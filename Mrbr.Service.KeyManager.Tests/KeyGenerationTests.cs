@@ -88,7 +88,7 @@ public class KeyGenerationTests {
         // Assert
         Assert.Equal(42, result.KeyId);
         Assert.Equal(32, result.KeyBytes.Length);
-        Assert.Equal(16, result.Vectors.Length);
+        Assert.Equal(1, result.Vectors.Length); // Directional walk now stores only first vector
         Assert.InRange(result.StartPosition, 0, 16 * 16 * 8 - 1);
     }
 
@@ -109,12 +109,11 @@ public class KeyGenerationTests {
         // Generate initial key
         var original = generator.GenerateKey(sourceText, keyId: 100, maxTargetBytes: 32);
 
-        // Act - Regenerate using same parameters
+        // Act - Regenerate using same startPosition (vectors are derived dynamically)
         var regenerated = generator.RegenerateKey(
             sourceText,
             keyId: 100,
             original.StartPosition,
-            original.Vectors,
             maxTargetBytes: 32
         );
 
@@ -388,6 +387,61 @@ public class KeyGenerationTests {
         Assert.Equal(signResult, checkResult);
     }
 
+    [Fact]
+    public void KeyService_Matrix_GenerateThenGet_WithVectorChainTracing() {
+        // This test traces the directional vector chain to verify dynamic derivation
+        ResetKeyServiceOptionsState();
+        string sourceText = BuildAsciiSourceText(16 * 16 * 8 * 8);
+        var config = new KeyServiceConfig {
+            new() {
+                Key = 0,
+                Value = sourceText,
+                KeyIdMask = "0",
+                Type = KeyType.Matrix,
+                MatrixSettings = new KeyMatrixSettings { Width = 16, Height = 16, Depth = 8 }
+            }
+        };
+
+        var options = new KeyServiceOptions(Options.Create(config));
+        var service = new KeyService(options);
+
+        // Act
+        byte[] signResult = service.GenerateKey256(out int keyResult);
+        byte[] checkResult = service.GetKey256(keyResult);
+
+        // Trace first vector and first few leg bytes
+        int startPosition = (keyResult >> KeyService.matrixStartPositionSize) & KeyService.matrixStartPositionMask;
+        byte firstVector = MatrixKeyGenerator.DeriveFirstVector(sourceText, startPosition);
+
+        int dx = DecodeVectorComponentPublic((byte)((firstVector >> 4) & 0x3));
+        int dy = DecodeVectorComponentPublic((byte)((firstVector >> 2) & 0x3));
+        int dz = DecodeVectorComponentPublic((byte)(firstVector & 0x3));
+
+        _output.WriteLine($"=== Matrix Directional Walking Vector Chain ===");
+        _output.WriteLine($"KeyResult:      {keyResult}");
+        _output.WriteLine($"StartPosition:  {startPosition}");
+        _output.WriteLine($"First Vector:   0x{firstVector:X2} [dx={dx}, dy={dy}, dz={dz}]");
+        _output.WriteLine($"");
+        _output.WriteLine($"Leg 1 bytes (0-7):   {string.Join(", ", signResult.Take(8).Select(b => b.ToString()))}");
+
+        if (signResult.Length >= 16) {
+            _output.WriteLine($"Leg 2 bytes (8-15):  {string.Join(", ", signResult.Skip(8).Take(8).Select(b => b.ToString()))}");
+        }
+        if (signResult.Length >= 24) {
+            _output.WriteLine($"Leg 3 bytes (16-23): {string.Join(", ", signResult.Skip(16).Take(8).Select(b => b.ToString()))}");
+        }
+        if (signResult.Length >= 32) {
+            _output.WriteLine($"Leg 4 bytes (24-31): {string.Join(", ", signResult.Skip(24).Take(8).Select(b => b.ToString()))}");
+        }
+
+        // Assert
+        Assert.Equal(signResult, checkResult);
+    }
+
+    private static int DecodeVectorComponentPublic(byte component) {
+        return component == 0 ? 0 : (component == 1 ? 1 : (component == 2 ? -1 : 0));
+    }
+
     public void MatrixKeyGenerator_Regenerate_WithRandomizedVectorsPositionsAndLengths_ReturnsSameBytes(int iteration) {
         // Arrange
         var settings = new KeyMatrixSettings {
@@ -550,6 +604,334 @@ public class KeyGenerationTests {
         }
 
         return vectors;
+    }
+
+    // ==========================================
+    // 6-BIT DIRECTIONAL VECTOR UNIT TESTS
+    // ==========================================
+
+    [Fact]
+    public void OptimizedKeyWalker_Pack6BitVectors_RoundTrip() {
+        // Arrange
+        byte[] original = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            original[i] = (byte)(i % 64); // Values 0-15 (modulo 64 to stay in 6-bit range)
+        }
+
+        byte[] packed = new byte[12];
+        byte[] unpacked = new byte[16];
+
+        // Act
+        OptimizedKeyWalker.Pack6BitVectors(original, packed);
+
+        unsafe {
+            fixed (byte* pUnpacked = unpacked) {
+                OptimizedKeyWalker.Unpack6BitVectors(packed, pUnpacked);
+            }
+        }
+
+        // Assert
+        Assert.Equal(12, packed.Length);
+        Assert.Equal(original, unpacked);
+
+        _output.WriteLine("Pack6BitVectors round-trip test passed");
+        _output.WriteLine($"Original:  {string.Join(",", original)}");
+        _output.WriteLine($"Unpacked:  {string.Join(",", unpacked)}");
+    }
+
+    [Theory]
+    [InlineData(0, 0)]   // 00 -> 0 (no move)
+    [InlineData(1, 1)]   // 01 -> +1
+    [InlineData(2, -1)]  // 10 -> -1
+    [InlineData(3, 0)]   // 11 -> 0 (reserved, treated as no-move)
+    public void OptimizedKeyWalker_DecodeVectorComponent_AllValues(byte component, int expected) {
+        // Act
+        int result = TestDecodeVectorComponent(component);
+
+        // Assert
+        Assert.Equal(expected, result);
+        _output.WriteLine($"Component {component:X2} -> {result}");
+    }
+
+    [Fact]
+    public void MatrixKeyGenerator_DeriveFirstVector_Deterministic() {
+        // Arrange
+        string sourceText = BuildAsciiSourceText(1024);
+        int startPosition = 100;
+
+        // Act
+        byte vector1 = MatrixKeyGenerator.DeriveFirstVector(sourceText, startPosition);
+        byte vector2 = MatrixKeyGenerator.DeriveFirstVector(sourceText, startPosition);
+
+        // Assert
+        Assert.Equal(vector1, vector2);
+        Assert.InRange(vector1, (byte)0x00, (byte)0x3E); // Should not be 0x3F (stop marker)
+
+        // Decode components
+        byte x = (byte)((vector1 >> 4) & 0x3);
+        byte y = (byte)((vector1 >> 2) & 0x3);
+        byte z = (byte)(vector1 & 0x3);
+
+        // None should be 3 (reserved/11)
+        Assert.NotEqual(3, x);
+        Assert.NotEqual(3, y);
+        Assert.NotEqual(3, z);
+
+        _output.WriteLine($"DeriveFirstVector deterministic: {vector1:X2} [x={x}, y={y}, z={z}]");
+    }
+
+    [Fact]
+    public void MatrixKeyGenerator_DeriveFirstVector_DifferentPositions_ProduceDifferentVectors() {
+        // Arrange
+        string sourceText = BuildAsciiSourceText(1024);
+
+        // Act
+        byte vector1 = MatrixKeyGenerator.DeriveFirstVector(sourceText, 100);
+        byte vector2 = MatrixKeyGenerator.DeriveFirstVector(sourceText, 200);
+        byte vector3 = MatrixKeyGenerator.DeriveFirstVector(sourceText, 300);
+
+        // Assert - different positions should produce different vectors (statistically)
+        bool allDifferent = vector1 != vector2 && vector2 != vector3 && vector1 != vector3;
+
+        _output.WriteLine($"Position 100: {vector1:X2}");
+        _output.WriteLine($"Position 200: {vector2:X2}");
+        _output.WriteLine($"Position 300: {vector3:X2}");
+        _output.WriteLine($"All different: {allDifferent}");
+
+        // At least some should differ (very high probability)
+        Assert.True(vector1 != vector2 || vector2 != vector3);
+    }
+
+    [Fact]
+    public void OptimizedKeyWalker_DeriveNextVectorInline_ProducesDifferentVectors() {
+        // Arrange
+        byte[] leg1Bytes = new byte[8] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        byte[] leg2Bytes = new byte[8] { 10, 20, 30, 40, 50, 60, 70, 80 };
+        byte[] leg3Bytes = new byte[8] { 100, 101, 102, 103, 104, 105, 106, 107 };
+
+        // Act
+        byte vector1, vector2, vector3;
+        unsafe {
+            fixed (byte* p1 = leg1Bytes)
+            fixed (byte* p2 = leg2Bytes)
+            fixed (byte* p3 = leg3Bytes) {
+                vector1 = TestDeriveNextVectorInline(p1);
+                vector2 = TestDeriveNextVectorInline(p2);
+                vector3 = TestDeriveNextVectorInline(p3);
+            }
+        }
+
+        // Assert - different inputs should produce different outputs
+        Assert.NotEqual(0x3F, vector1); // Should not be stop marker
+        Assert.NotEqual(0x3F, vector2);
+        Assert.NotEqual(0x3F, vector3);
+
+        _output.WriteLine($"Leg1 bytes -> vector: {vector1:X2}");
+        _output.WriteLine($"Leg2 bytes -> vector: {vector2:X2}");
+        _output.WriteLine($"Leg3 bytes -> vector: {vector3:X2}");
+
+        // At least some should differ
+        Assert.True(vector1 != vector2 || vector2 != vector3);
+    }
+
+    // Helper method to access private DecodeVectorComponent via reflection (for testing)
+    private static int TestDecodeVectorComponent(byte component) {
+        var method = typeof(OptimizedKeyWalker).GetMethod("DecodeVectorComponent",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+
+        return (int)method!.Invoke(null, new object[] { component })!;
+    }
+
+    // Helper method to access private DeriveNextVectorInline via reflection (for testing)
+    private static unsafe byte TestDeriveNextVectorInline(byte* pLegBytes) {
+        var method = typeof(OptimizedKeyWalker).GetMethod("DeriveNextVectorInline",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+
+        return (byte)method!.Invoke(null, new object[] { (IntPtr)pLegBytes })!;
+    }
+
+    // ==========================================
+    // DIRECTIONAL WALKING INTEGRATION TESTS
+    // ==========================================
+
+    [Fact]
+    public void OptimizedKeyWalker_DirectionalWalk_SingleLeg_Collects8Bytes() {
+        // Arrange
+        var settings = new KeyMatrixSettings {
+            Width = 32,
+            Height = 32,
+            Depth = 16,
+            VectorMask = 0,
+            KeyMask = 0
+        };
+
+        var walker = new OptimizedKeyWalker(Options.Create(settings));
+        var builder = new MatrixBuilder(settings);
+
+        string sourceText = BuildAsciiSourceText(32 * 32 * 16 * 8);
+        byte[] flatMatrix = builder.BuildFlatMatrix(sourceText);
+
+        byte[] result = new byte[8];
+        byte testVector = 0x01; // [00, 00, 01] = +X direction only
+
+        // Act
+        int bytesWritten;
+        unsafe {
+            fixed (byte* pResult = result) {
+                bytesWritten = walker.WalkMatrixDirectional(
+                    flatMatrix, 10, 10, 10, // Start position
+                    testVector, pResult, 8);
+            }
+        }
+
+        // Assert
+        Assert.Equal(8, bytesWritten);
+        Assert.All(result, b => Assert.NotEqual(0, b)); // Should have collected data
+
+        _output.WriteLine($"Single leg walk collected {bytesWritten} bytes");
+        _output.WriteLine($"Bytes: {string.Join(", ", result)}");
+    }
+
+    [Fact]
+    public void OptimizedKeyWalker_DirectionalWalk_WrapAroundPerStep() {
+        // Arrange - small matrix for easy wrap testing
+        var settings = new KeyMatrixSettings {
+            Width = 16,
+            Height = 16,
+            Depth = 8,
+            VectorMask = 0,
+            KeyMask = 0
+        };
+
+        var walker = new OptimizedKeyWalker(Options.Create(settings));
+        var builder = new MatrixBuilder(settings);
+
+        string sourceText = BuildAsciiSourceText(16 * 16 * 8 * 8);
+        byte[] flatMatrix = builder.BuildFlatMatrix(sourceText);
+
+        byte[] result = new byte[16];
+        byte testVector = 0x01; // +X direction
+
+        // Act - start near boundary to force wrap
+        int bytesWritten;
+        unsafe {
+            fixed (byte* pResult = result) {
+                bytesWritten = walker.WalkMatrixDirectional(
+                    flatMatrix, 14, 5, 5, // Start at x=14, will wrap at x=0 after 2 steps
+                    testVector, pResult, 16);
+            }
+        }
+
+        // Assert
+        Assert.Equal(16, bytesWritten);
+        _output.WriteLine($"Wrap-around walk collected {bytesWritten} bytes");
+        _output.WriteLine($"Starting position [14,5,5], vector +X, width=16");
+    }
+
+    [Fact]
+    public void OptimizedKeyWalker_DirectionalWalk_MultiLegChain() {
+        // Arrange
+        var settings = new KeyMatrixSettings {
+            Width = 32,
+            Height = 32,
+            Depth = 16,
+            VectorMask = 0,
+            KeyMask = 0
+        };
+
+        var walker = new OptimizedKeyWalker(Options.Create(settings));
+        var builder = new MatrixBuilder(settings);
+
+        string sourceText = BuildAsciiSourceText(32 * 32 * 16 * 8);
+        byte[] flatMatrix = builder.BuildFlatMatrix(sourceText);
+
+        byte[] result = new byte[32]; // 4 legs × 8 bytes
+        byte firstVector = 0x15; // [01, 01, 01] = +X, +Y, +Z diagonal
+
+        // Act
+        int bytesWritten;
+        unsafe {
+            fixed (byte* pResult = result) {
+                bytesWritten = walker.WalkMatrixDirectional(
+                    flatMatrix, 10, 10, 10,
+                    firstVector, pResult, 32);
+            }
+        }
+
+        // Assert
+        Assert.Equal(32, bytesWritten);
+        _output.WriteLine($"Multi-leg walk collected {bytesWritten} bytes (4 legs × 8 bytes)");
+
+        // Show first few bytes from each leg
+        _output.WriteLine($"Leg 1: {result[0]}, {result[1]}, ..., {result[7]}");
+        _output.WriteLine($"Leg 2: {result[8]}, {result[9]}, ..., {result[15]}");
+        _output.WriteLine($"Leg 3: {result[16]}, {result[17]}, ..., {result[23]}");
+        _output.WriteLine($"Leg 4: {result[24]}, {result[25]}, ..., {result[31]}");
+    }
+
+    [Fact]
+    public void OptimizedKeyWalker_DirectionalWalk_StopMarkerHandling() {
+        // Arrange
+        var settings = new KeyMatrixSettings {
+            Width = 32,
+            Height = 32,
+            Depth = 16,
+            VectorMask = 0,
+            KeyMask = 0
+        };
+
+        var walker = new OptimizedKeyWalker(Options.Create(settings));
+        var builder = new MatrixBuilder(settings);
+
+        string sourceText = BuildAsciiSourceText(32 * 32 * 16 * 8);
+        byte[] flatMatrix = builder.BuildFlatMatrix(sourceText);
+
+        byte[] result = new byte[64];
+        byte stopMarker = 0x3F; // [11, 11, 11] = stop marker
+
+        // Act - should stop immediately
+        int bytesWritten;
+        unsafe {
+            fixed (byte* pResult = result) {
+                bytesWritten = walker.WalkMatrixDirectional(
+                    flatMatrix, 10, 10, 10,
+                    stopMarker, pResult, 64);
+            }
+        }
+
+        // Assert
+        Assert.Equal(0, bytesWritten); // Should not write any bytes when first vector is stop marker
+        _output.WriteLine($"Stop marker test: {bytesWritten} bytes written (expected 0)");
+    }
+
+    [Fact]
+    public void MatrixKeyGenerator_DirectionalWalk_GenerateAndRegenerate_Identical() {
+        // Arrange
+        var settings = new KeyMatrixSettings {
+            Width = 32,
+            Height = 32,
+            Depth = 16,
+            VectorMask = 0xABCDEF0123456789UL,
+            KeyMask = 0x0123456789ABCDEFUL
+        };
+
+        var generator = new MatrixKeyGenerator(settings);
+        string sourceText = BuildAsciiSourceText(32 * 32 * 16 * 8);
+
+        // Act - Generate
+        var genResult = generator.GenerateKey(sourceText, 42, 32);
+
+        // Act - Regenerate using same startPosition
+        var regenResult = generator.RegenerateKey(sourceText, 42, genResult.StartPosition, 32);
+
+        // Assert
+        Assert.Equal(genResult.KeyBytes, regenResult.KeyBytes);
+        Assert.Equal(genResult.StartPosition, regenResult.StartPosition);
+
+        _output.WriteLine($"Generate/Regenerate test passed");
+        _output.WriteLine($"StartPosition: {genResult.StartPosition}");
+        _output.WriteLine($"First vector: 0x{genResult.Vectors[0]:X2}");
+        _output.WriteLine($"KeyBytes match: {genResult.KeyBytes.SequenceEqual(regenResult.KeyBytes)}");
     }
 
     private static string BuildExpectedBlockMaterial(string sourceText, int keyPosition, int keyLength) {

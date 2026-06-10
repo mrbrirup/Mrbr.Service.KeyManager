@@ -59,6 +59,8 @@ public unsafe class OptimizedKeyWalker {
         _keyMask = settings.KeyMask;
     }
     const ulong Mask1FU64 = 0x1FUL;
+    const ulong Mask3FU64 = 0x3FUL;
+
     /// <summary>
     /// Compresses sixteen 5-bit vector steps into a 10-byte block.
     /// </summary>
@@ -120,6 +122,108 @@ public unsafe class OptimizedKeyWalker {
             pOut[14] = (byte)((lowRegister >> 22) & 0x1F);
             pOut[15] = (byte)((lowRegister >> 27) & 0x1F);
         }
+    }
+
+    /// <summary>
+    /// Compresses sixteen 6-bit directional vectors into a 12-byte block.
+    /// Each vector encodes [2bit-X | 2bit-Y | 2bit-Z] direction components.
+    /// 16 vectors × 6 bits = 96 bits = 12 bytes.
+    /// Uses byte-level bit packing for correctness over micro-optimization.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void Pack6BitVectors(ReadOnlySpan<byte> unpacked16Bytes, Span<byte> packed12Bytes) {
+        // Pack 16 6-bit values into 12 bytes (96 bits)
+        // Layout: AAAAAA|BBBBBB|CC|CCCCDD|DDDDEE|EEEEEE| ... (4 vectors per 3 bytes)
+
+        // Group 1: vectors 0-3 into bytes 0-2
+        packed12Bytes[0] = (byte)((unpacked16Bytes[0] & 0x3F) | ((unpacked16Bytes[1] & 0x03) << 6));
+        packed12Bytes[1] = (byte)(((unpacked16Bytes[1] & 0x3C) >> 2) | ((unpacked16Bytes[2] & 0x0F) << 4));
+        packed12Bytes[2] = (byte)(((unpacked16Bytes[2] & 0x30) >> 4) | ((unpacked16Bytes[3] & 0x3F) << 2));
+
+        // Group 2: vectors 4-7 into bytes 3-5
+        packed12Bytes[3] = (byte)((unpacked16Bytes[4] & 0x3F) | ((unpacked16Bytes[5] & 0x03) << 6));
+        packed12Bytes[4] = (byte)(((unpacked16Bytes[5] & 0x3C) >> 2) | ((unpacked16Bytes[6] & 0x0F) << 4));
+        packed12Bytes[5] = (byte)(((unpacked16Bytes[6] & 0x30) >> 4) | ((unpacked16Bytes[7] & 0x3F) << 2));
+
+        // Group 3: vectors 8-11 into bytes 6-8
+        packed12Bytes[6] = (byte)((unpacked16Bytes[8] & 0x3F) | ((unpacked16Bytes[9] & 0x03) << 6));
+        packed12Bytes[7] = (byte)(((unpacked16Bytes[9] & 0x3C) >> 2) | ((unpacked16Bytes[10] & 0x0F) << 4));
+        packed12Bytes[8] = (byte)(((unpacked16Bytes[10] & 0x30) >> 4) | ((unpacked16Bytes[11] & 0x3F) << 2));
+
+        // Group 4: vectors 12-15 into bytes 9-11
+        packed12Bytes[9] = (byte)((unpacked16Bytes[12] & 0x3F) | ((unpacked16Bytes[13] & 0x03) << 6));
+        packed12Bytes[10] = (byte)(((unpacked16Bytes[13] & 0x3C) >> 2) | ((unpacked16Bytes[14] & 0x0F) << 4));
+        packed12Bytes[11] = (byte)(((unpacked16Bytes[14] & 0x30) >> 4) | ((unpacked16Bytes[15] & 0x3F) << 2));
+    }
+
+    /// <summary>
+    /// Expands a 12-byte packed stream into 16 6-bit directional vectors.
+    /// Each vector is decoded as [2bit-X | 2bit-Y | 2bit-Z] components.
+    /// Uses byte-level bit unpacking for correctness.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void Unpack6BitVectors(ReadOnlySpan<byte> packed12Bytes, byte* pOut) {
+        // Unpack 12 bytes (96 bits) into 16 6-bit values
+        // Layout: AAAAAA|BBBBBB|CC|CCCCDD|DDDDEE|EEEEEE| ... (4 vectors per 3 bytes)
+
+        // Group 1: bytes 0-2 into vectors 0-3
+        pOut[0] = (byte)(packed12Bytes[0] & 0x3F);
+        pOut[1] = (byte)(((packed12Bytes[0] >> 6) & 0x03) | ((packed12Bytes[1] & 0x0F) << 2));
+        pOut[2] = (byte)(((packed12Bytes[1] >> 4) & 0x0F) | ((packed12Bytes[2] & 0x03) << 4));
+        pOut[3] = (byte)((packed12Bytes[2] >> 2) & 0x3F);
+
+        // Group 2: bytes 3-5 into vectors 4-7
+        pOut[4] = (byte)(packed12Bytes[3] & 0x3F);
+        pOut[5] = (byte)(((packed12Bytes[3] >> 6) & 0x03) | ((packed12Bytes[4] & 0x0F) << 2));
+        pOut[6] = (byte)(((packed12Bytes[4] >> 4) & 0x0F) | ((packed12Bytes[5] & 0x03) << 4));
+        pOut[7] = (byte)((packed12Bytes[5] >> 2) & 0x3F);
+
+        // Group 3: bytes 6-8 into vectors 8-11
+        pOut[8] = (byte)(packed12Bytes[6] & 0x3F);
+        pOut[9] = (byte)(((packed12Bytes[6] >> 6) & 0x03) | ((packed12Bytes[7] & 0x0F) << 2));
+        pOut[10] = (byte)(((packed12Bytes[7] >> 4) & 0x0F) | ((packed12Bytes[8] & 0x03) << 4));
+        pOut[11] = (byte)((packed12Bytes[8] >> 2) & 0x3F);
+
+        // Group 4: bytes 9-11 into vectors 12-15
+        pOut[12] = (byte)(packed12Bytes[9] & 0x3F);
+        pOut[13] = (byte)(((packed12Bytes[9] >> 6) & 0x03) | ((packed12Bytes[10] & 0x0F) << 2));
+        pOut[14] = (byte)(((packed12Bytes[10] >> 4) & 0x0F) | ((packed12Bytes[11] & 0x03) << 4));
+        pOut[15] = (byte)((packed12Bytes[11] >> 2) & 0x3F);
+    }
+
+    /// <summary>
+    /// Decodes a 2-bit vector component into a movement delta.
+    /// 00 (0) = no move (0), 01 (1) = plus (+1), 10 (2) = minus (-1), 11 (3) = reserved.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int DecodeVectorComponent(byte component) {
+        // Fast branchless decode: 0→0, 1→+1, 2→-1, 3→0 (treat reserved as no-move)
+        return component == 0 ? 0 : (component == 1 ? 1 : (component == 2 ? -1 : 0));
+    }
+
+    /// <summary>
+    /// Derives the next 6-bit directional vector from a leg's collected 8 bytes.
+    /// Uses fast XOR-fold hash to produce deterministic vector, avoiding 0x3F (stop marker).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static byte DeriveNextVectorInline(byte* pLegBytes) {
+        // XOR-fold all 8 bytes into a single byte
+        byte hash = (byte)(pLegBytes[0] ^ pLegBytes[1] ^ pLegBytes[2] ^ pLegBytes[3] ^
+                           pLegBytes[4] ^ pLegBytes[5] ^ pLegBytes[6] ^ pLegBytes[7]);
+
+        // Map to 6-bit space: ensure each 2-bit component is 00, 01, or 10 (not 11)
+        // This avoids creating 0x3F (all 11s = stop marker) and creates valid directions
+        byte x = (byte)((hash >> 6) & 0x3); // Top 2 bits
+        byte y = (byte)((hash >> 4) & 0x3); // Middle 2 bits
+        byte z = (byte)((hash >> 2) & 0x3); // Bottom 2 bits
+
+        // Clamp 11 (3) to 10 (2) to avoid reserved value
+        if (x == 3) x = 2;
+        if (y == 3) y = 2;
+        if (z == 3) z = 2;
+
+        // Recombine into 6-bit vector: [x:2bit | y:2bit | z:2bit]
+        return (byte)((x << 4) | (y << 2) | z);
     }
 
     /// <summary>
@@ -323,6 +427,238 @@ public unsafe class OptimizedKeyWalker {
 
 
         EndOfWalk:;
+        }
+        return bytesWritten;
+    }
+
+    /// <summary>
+    /// Performs directional 3D matrix walk where each vector specifies a direction to walk 8 steps.
+    /// Each leg collects 1 byte per step (8 bytes total), and the next vector is derived from those bytes.
+    /// Supports early exit via target length or 0x3F stop marker.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int WalkMatrixDirectional(
+        byte[] flatMatrix,
+        int sx, int sy, int sz,
+        byte firstVector,
+        byte* pResult,
+        int maxTargetBytes)
+    {
+        int cx = sx; int cy = sy; int cz = sz;
+        int bytesWritten = 0;
+
+        int wMask = _widthMask; int hMask = _heightMask; int dMask = _depthMask;
+        int sY = _strideY; int sZ = _strideZ;
+
+        byte currentVector = firstVector;
+        int maxLegs = (maxTargetBytes / 8) + 1; // Calculate needed legs plus one for stop marker
+
+        fixed (byte* pMatrix = flatMatrix) {
+            // Unrolled loop for up to 16 legs (supports up to 128-byte keys)
+            // Each leg walks 8 steps in the direction specified by currentVector
+
+            // ==========================================
+            // LEG 1
+            // ==========================================
+            if (bytesWritten >= maxTargetBytes || currentVector == 0x3F) goto EndOfDirectionalWalk;
+            {
+                int dx = DecodeVectorComponent((byte)((currentVector >> 4) & 0x3));
+                int dy = DecodeVectorComponent((byte)((currentVector >> 2) & 0x3));
+                int dz = DecodeVectorComponent((byte)(currentVector & 0x3));
+
+                // Walk 8 steps - each step moves the position and reads one byte from that cell
+                for (int step = 0; step < 8 && bytesWritten < maxTargetBytes; step++) {
+                    cx = (cx + dx) & wMask;
+                    cy = (cy + dy) & hMask;
+                    cz = (cz + dz) & dMask;
+                    int cellOffset = (cx << 3) + (cy * sY) + (cz * sZ);
+                    // Read the byte at this step index within the 8-byte cell
+                    pResult[bytesWritten++] = pMatrix[cellOffset + step];
+                }
+
+                if (bytesWritten >= 8) {
+                    currentVector = DeriveNextVectorInline(pResult + bytesWritten - 8);
+                }
+            }
+
+            // ==========================================
+            // LEG 2
+            // ==========================================
+            if (bytesWritten >= maxTargetBytes || currentVector == 0x3F) goto EndOfDirectionalWalk;
+            {
+                int dx = DecodeVectorComponent((byte)((currentVector >> 4) & 0x3));
+                int dy = DecodeVectorComponent((byte)((currentVector >> 2) & 0x3));
+                int dz = DecodeVectorComponent((byte)(currentVector & 0x3));
+
+                for (int step = 0; step < 8 && bytesWritten < maxTargetBytes; step++) {
+                    cx = (cx + dx) & wMask;
+                    cy = (cy + dy) & hMask;
+                    cz = (cz + dz) & dMask;
+                    int cellOffset = (cx << 3) + (cy * sY) + (cz * sZ);
+                    pResult[bytesWritten++] = pMatrix[cellOffset + step];
+                }
+
+                if (bytesWritten >= 16) {
+                    currentVector = DeriveNextVectorInline(pResult + bytesWritten - 8);
+                }
+            }
+
+            // ==========================================
+            // LEG 3
+            // ==========================================
+            if (bytesWritten >= maxTargetBytes || currentVector == 0x3F) goto EndOfDirectionalWalk;
+            {
+                int dx = DecodeVectorComponent((byte)((currentVector >> 4) & 0x3));
+                int dy = DecodeVectorComponent((byte)((currentVector >> 2) & 0x3));
+                int dz = DecodeVectorComponent((byte)(currentVector & 0x3));
+
+                for (int step = 0; step < 8 && bytesWritten < maxTargetBytes; step++) {
+                    cx = (cx + dx) & wMask;
+                    cy = (cy + dy) & hMask;
+                    cz = (cz + dz) & dMask;
+                    int cellOffset = (cx << 3) + (cy * sY) + (cz * sZ);
+                    pResult[bytesWritten++] = pMatrix[cellOffset + step];
+                }
+
+                if (bytesWritten >= 24) {
+                    currentVector = DeriveNextVectorInline(pResult + bytesWritten - 8);
+                }
+            }
+
+            // ==========================================
+            // LEG 4
+            // ==========================================
+            if (bytesWritten >= maxTargetBytes || currentVector == 0x3F) goto EndOfDirectionalWalk;
+            {
+                int dx = DecodeVectorComponent((byte)((currentVector >> 4) & 0x3));
+                int dy = DecodeVectorComponent((byte)((currentVector >> 2) & 0x3));
+                int dz = DecodeVectorComponent((byte)(currentVector & 0x3));
+
+                for (int step = 0; step < 8 && bytesWritten < maxTargetBytes; step++) {
+                    cx = (cx + dx) & wMask;
+                    cy = (cy + dy) & hMask;
+                    cz = (cz + dz) & dMask;
+                    int cellOffset = (cx << 3) + (cy * sY) + (cz * sZ);
+                    pResult[bytesWritten++] = pMatrix[cellOffset + step];
+                }
+
+                if (bytesWritten >= 32) {
+                    currentVector = DeriveNextVectorInline(pResult + bytesWritten - 8);
+                }
+            }
+
+            // ==========================================
+            // LEG 5
+            // ==========================================
+            if (bytesWritten >= maxTargetBytes || currentVector == 0x3F) goto EndOfDirectionalWalk;
+            {
+                int dx = DecodeVectorComponent((byte)((currentVector >> 4) & 0x3));
+                int dy = DecodeVectorComponent((byte)((currentVector >> 2) & 0x3));
+                int dz = DecodeVectorComponent((byte)(currentVector & 0x3));
+
+                for (int step = 0; step < 8 && bytesWritten < maxTargetBytes; step++) {
+                    cx = (cx + dx) & wMask;
+                    cy = (cy + dy) & hMask;
+                    cz = (cz + dz) & dMask;
+                    int cellOffset = (cx << 3) + (cy * sY) + (cz * sZ);
+                    pResult[bytesWritten++] = pMatrix[cellOffset + step];
+                }
+
+                if (bytesWritten >= 40) {
+                    currentVector = DeriveNextVectorInline(pResult + bytesWritten - 8);
+                }
+            }
+
+            // ==========================================
+            // LEG 6
+            // ==========================================
+            if (bytesWritten >= maxTargetBytes || currentVector == 0x3F) goto EndOfDirectionalWalk;
+            {
+                int dx = DecodeVectorComponent((byte)((currentVector >> 4) & 0x3));
+                int dy = DecodeVectorComponent((byte)((currentVector >> 2) & 0x3));
+                int dz = DecodeVectorComponent((byte)(currentVector & 0x3));
+
+                for (int step = 0; step < 8 && bytesWritten < maxTargetBytes; step++) {
+                    cx = (cx + dx) & wMask;
+                    cy = (cy + dy) & hMask;
+                    cz = (cz + dz) & dMask;
+                    int cellOffset = (cx << 3) + (cy * sY) + (cz * sZ);
+                    pResult[bytesWritten++] = pMatrix[cellOffset + step];
+                }
+
+                if (bytesWritten >= 48) {
+                    currentVector = DeriveNextVectorInline(pResult + bytesWritten - 8);
+                }
+            }
+
+            // ==========================================
+            // LEG 7
+            // ==========================================
+            if (bytesWritten >= maxTargetBytes || currentVector == 0x3F) goto EndOfDirectionalWalk;
+            {
+                int dx = DecodeVectorComponent((byte)((currentVector >> 4) & 0x3));
+                int dy = DecodeVectorComponent((byte)((currentVector >> 2) & 0x3));
+                int dz = DecodeVectorComponent((byte)(currentVector & 0x3));
+
+                for (int step = 0; step < 8 && bytesWritten < maxTargetBytes; step++) {
+                    cx = (cx + dx) & wMask;
+                    cy = (cy + dy) & hMask;
+                    cz = (cz + dz) & dMask;
+                    int cellOffset = (cx << 3) + (cy * sY) + (cz * sZ);
+                    pResult[bytesWritten++] = pMatrix[cellOffset + step];
+                }
+
+                if (bytesWritten >= 56) {
+                    currentVector = DeriveNextVectorInline(pResult + bytesWritten - 8);
+                }
+            }
+
+            // ==========================================
+            // LEG 8
+            // ==========================================
+            if (bytesWritten >= maxTargetBytes || currentVector == 0x3F) goto EndOfDirectionalWalk;
+            {
+                int dx = DecodeVectorComponent((byte)((currentVector >> 4) & 0x3));
+                int dy = DecodeVectorComponent((byte)((currentVector >> 2) & 0x3));
+                int dz = DecodeVectorComponent((byte)(currentVector & 0x3));
+
+                for (int step = 0; step < 8 && bytesWritten < maxTargetBytes; step++) {
+                    cx = (cx + dx) & wMask;
+                    cy = (cy + dy) & hMask;
+                    cz = (cz + dz) & dMask;
+                    int cellOffset = (cx << 3) + (cy * sY) + (cz * sZ);
+                    pResult[bytesWritten++] = pMatrix[cellOffset + step];
+                }
+
+                if (bytesWritten >= 64) {
+                    currentVector = DeriveNextVectorInline(pResult + bytesWritten - 8);
+                }
+            }
+
+            // ==========================================
+            // Additional legs 9-16 for larger keys (up to 128 bytes)
+            // ==========================================
+            for (int leg = 9; leg <= 16 && bytesWritten < maxTargetBytes; leg++) {
+                if (currentVector == 0x3F) break;
+
+                int dx = DecodeVectorComponent((byte)((currentVector >> 4) & 0x3));
+                int dy = DecodeVectorComponent((byte)((currentVector >> 2) & 0x3));
+                int dz = DecodeVectorComponent((byte)(currentVector & 0x3));
+
+                for (int step = 0; step < 8 && bytesWritten < maxTargetBytes; step++) {
+                    cx = (cx + dx) & wMask;
+                    cy = (cy + dy) & hMask;
+                    cz = (cz + dz) & dMask;
+                    int cellOffset = (cx << 3) + (cy * sY) + (cz * sZ);
+                    pResult[bytesWritten++] = pMatrix[cellOffset + step];
+                }
+
+                if ((bytesWritten % 8) == 0 && bytesWritten >= 8) {
+                    currentVector = DeriveNextVectorInline(pResult + bytesWritten - 8);
+                }
+            }
+
+        EndOfDirectionalWalk:;
         }
         return bytesWritten;
     }

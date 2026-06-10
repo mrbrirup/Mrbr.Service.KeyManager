@@ -46,15 +46,15 @@ public class MatrixKeyGenerator {
     }
 
     /// <summary>
-    /// Generates a matrix key using a random start position. Vectors are derived
-    /// deterministically from the start position and source text, so the returned
-    /// startPosition alone (combined with the source text) is sufficient to reproduce
+    /// Generates a matrix key using directional walking. First vector is derived from start position,
+    /// subsequent vectors are dynamically derived from bytes collected in each leg.
+    /// The startPosition alone (combined with source text) is sufficient to reproduce
     /// identical key bytes via <see cref="RegenerateKey(string,byte,int,int)"/>.
     /// </summary>
     /// <param name="sourceText">Source text to use as matrix data</param>
     /// <param name="keyId">The key ID (0-255)</param>
-    /// <param name="maxTargetBytes">Target key size in bytes (16, 24, or 32)</param>
-    /// <returns>Result containing generated key bytes, start position, and derived vectors</returns>
+    /// <param name="maxTargetBytes">Target key size in bytes (16, 24, 32, etc.)</param>
+    /// <returns>Result containing generated key bytes, start position, and first vector</returns>
     public unsafe MatrixKeyResult GenerateKey(string sourceText, byte keyId, int maxTargetBytes) {
         byte[] flatMatrix = _builder.BuildFlatMatrix(sourceText);
 
@@ -64,16 +64,15 @@ public class MatrixKeyGenerator {
 
         int startPosition = startX + (startY * _settings.Width) + (startZ * _settings.Width * _settings.Height);
 
-        // Derive vectors deterministically — same sourceText + startPosition always gives same vectors
-        byte[] vectors = DeriveVectors(sourceText, startPosition);
+        // Derive first directional vector from startPosition
+        byte firstVector = DeriveFirstVector(sourceText, startPosition);
 
         byte[] keyBytes = new byte[maxTargetBytes];
 
-        fixed (byte* pVectors = vectors)
         fixed (byte* pResult = keyBytes) {
-            int bytesWritten = _walker.WalkMatrixUnsafe(
+            int bytesWritten = _walker.WalkMatrixDirectional(
                 flatMatrix, startX, startY, startZ,
-                pVectors, pResult, maxTargetBytes
+                firstVector, pResult, maxTargetBytes
             );
 
             if (bytesWritten < maxTargetBytes) {
@@ -83,17 +82,21 @@ public class MatrixKeyGenerator {
             }
         }
 
+        // Store first vector for debugging/testing (subsequent vectors derived dynamically)
+        byte[] vectorsForResult = new byte[1] { firstVector };
+
         return new MatrixKeyResult {
             KeyId = keyId,
             StartPosition = startPosition,
-            Vectors = vectors,
+            Vectors = vectorsForResult,
             KeyBytes = keyBytes
         };
     }
 
     /// <summary>
-    /// Reproduces a key using only the start position. Vectors are re-derived
-    /// deterministically from sourceText and startPosition — no stored vectors needed.
+    /// Reproduces a key using only the start position. First vector is re-derived
+    /// deterministically from sourceText and startPosition, then directional walking
+    /// proceeds identically to generation. No stored vectors needed.
     /// This is the primary reproduction path used by KeyService.GetKeyBytes.
     /// </summary>
     /// <param name="sourceText">Source text to use as matrix data</param>
@@ -104,7 +107,8 @@ public class MatrixKeyGenerator {
     public unsafe MatrixKeyResult RegenerateKey(string sourceText, byte keyId, int startPosition, int maxTargetBytes) {
         byte[] flatMatrix = _builder.BuildFlatMatrix(sourceText);
 
-        byte[] vectors = DeriveVectors(sourceText, startPosition);
+        // Re-derive first vector from startPosition (deterministic)
+        byte firstVector = DeriveFirstVector(sourceText, startPosition);
 
         int startX = startPosition & _widthMask;
         int remainder = startPosition >> GetBitCount(_widthMask);
@@ -113,11 +117,10 @@ public class MatrixKeyGenerator {
 
         byte[] keyBytes = new byte[maxTargetBytes];
 
-        fixed (byte* pVectors = vectors)
         fixed (byte* pResult = keyBytes) {
-            int bytesWritten = _walker.WalkMatrixUnsafe(
+            int bytesWritten = _walker.WalkMatrixDirectional(
                 flatMatrix, startX, startY, startZ,
-                pVectors, pResult, maxTargetBytes
+                firstVector, pResult, maxTargetBytes
             );
 
             if (bytesWritten < maxTargetBytes) {
@@ -127,10 +130,13 @@ public class MatrixKeyGenerator {
             }
         }
 
+        // Store first vector for consistency with GenerateKey result
+        byte[] vectorsForResult = new byte[1] { firstVector };
+
         return new MatrixKeyResult {
             KeyId = keyId,
             StartPosition = startPosition,
-            Vectors = vectors,
+            Vectors = vectorsForResult,
             KeyBytes = keyBytes
         };
     }
@@ -207,6 +213,40 @@ public class MatrixKeyGenerator {
         }
 
         return vectors;
+    }
+
+    /// <summary>
+    /// Derives the first 6-bit directional vector from the source text and start position
+    /// using HMAC-SHA256. The vector encodes [2bit-X | 2bit-Y | 2bit-Z] direction components.
+    /// Components are clamped to {00, 01, 10} to avoid reserved value 11, ensuring valid directions.
+    /// </summary>
+    /// <param name="sourceText">Source text used as the HMAC key material</param>
+    /// <param name="startPosition">Start position used as HMAC data</param>
+    /// <returns>Single 6-bit directional vector (0x00-0x2A, avoiding 0x3F stop marker)</returns>
+    public static byte DeriveFirstVector(string sourceText, int startPosition) {
+        // Hash the source text once as the stable HMAC key
+        byte[] sourceHash = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(sourceText));
+
+        // HMAC-SHA256 keyed by source hash, data is the 4-byte start position
+        Span<byte> positionBytes = stackalloc byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(positionBytes, startPosition);
+
+        byte[] hmac = HMACSHA256.HashData(sourceHash, positionBytes);
+
+        // Extract first byte and derive 6-bit vector [X:2bit | Y:2bit | Z:2bit]
+        byte hash = hmac[0];
+
+        byte x = (byte)((hash >> 6) & 0x3); // Top 2 bits
+        byte y = (byte)((hash >> 4) & 0x3); // Middle 2 bits
+        byte z = (byte)((hash >> 2) & 0x3); // Bottom 2 bits
+
+        // Clamp 11 (3) to 10 (2) to avoid reserved/stop marker
+        if (x == 3) x = 2;
+        if (y == 3) y = 2;
+        if (z == 3) z = 2;
+
+        // Combine into 6-bit vector
+        return (byte)((x << 4) | (y << 2) | z);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
