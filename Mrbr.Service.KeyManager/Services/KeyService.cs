@@ -91,27 +91,31 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
     public const int KeySize128 = 16;
     public const int KeySize192 = 24;
     public const int KeySize256 = 32;
+    /// <summary>
+    /// Bit shift used to encode Matrix startPosition in keyResult bits 8-30.
+    /// Matrix keyResult format: [startPosition:23][keyId:8]
+    /// </summary>
+    public const int matrixStartPositionSize = 8;
+    /// <summary>
+    /// Bitmask to extract the 23-bit Matrix startPosition from keyResult after shifting.
+    /// Covers start positions 0-8,388,607 (more than enough for any practical matrix).
+    /// </summary>
+    public const int matrixStartPositionMask = 0x7FFFFF;
 
     /// <summary>
     /// Key Generation Architecture Notes:
     /// 
-    /// BLOCK KEYS (1D Contiguous Extraction):
-    /// - Uses position and length encoding in keyResult (int):
-    ///   [keyId:8bits][keyPosition:10bits][keyLength:10bits] = 26 bits
-    /// - Direct slice from source text
-    /// - keyResult can be used to recreate the exact same key material
+    /// BLOCK KEYS (1D Contiguous Extraction with Wrap-Around):
+    /// - keyResult format: [keyLength:10][keyPosition:10][keyId:8] = 28 bits
+    /// - Extracts contiguous key material from source text with wrap-around
+    /// - keyResult alone is sufficient to reproduce identical key material
     /// 
     /// MATRIX KEYS (3D Vector-Based Navigation):
-    /// - Uses Matrices.MatrixKeyGenerator with OptimizedKeyWalker
-    /// - Generates fresh random vectors each time (not stored in keyResult)
-    /// - keyResult only contains the keyId (0-255)
-    /// - Full matrix key information stored in Matrices.MatrixKeyResult:
-    ///   * KeyId (1 byte)
-    ///   * StartPosition (10 bits / 2 bytes)
-    ///   * Vectors (16 bytes)
-    ///   * KeyBytes (generated output)
-    /// - To recreate Matrix keys, use MatrixKeyResult.EncodeToBytes() and DecodeFromBytes()
-    /// - Matrix keys generate cryptographically secure output directly; no derivation needed
+    /// - keyResult format: [startPosition:23][keyId:8] = 31 bits
+    /// - Vectors are derived deterministically via DeriveVectors(sourceText, startPosition)
+    ///   so keyResult alone is sufficient to reproduce identical key bytes
+    /// - GetKey(keyResult) returns ReadOnlyMemory<char>.Empty for Matrix keys;
+    ///   use GetKeyBytes / GetKey128 / GetKey192 / GetKey256 to retrieve byte output
     /// </summary>
 
     /// <summary>
@@ -137,21 +141,30 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
         var keyServiceRecord = GetKeyServiceRecord(GetRandomKeyId());
 
         if (keyServiceRecord.Type == Configuration.KeyType.Block) {
-            // Block key generation (original behavior)
+            // Block key generation with wrap-around support
             int keyLength = minMaskLength + (RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
-                keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.MaxCharPosition);
-            //   0-255:8  0-1023:10    0-128:8        
+                keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.Value.Length);
+            //   0-255:8  0-1023:10    0-128:8
             //  [keyId][keyPosition][keyLength]
             var originalKeyResult = keyServiceRecord.Id +
                                     (keyPosition << keyPositionSize) +
                                     (keyLength << keyPositionAndLength);
             keyResult = ApplyKeyIdMask(originalKeyResult, keyServiceRecord.KeyIdMask);
-            return KeyServiceOptions.KeyMemory[keyServiceRecord.Id].Slice(keyPosition, keyLength);
+            return GetBlockKeyMaterial(KeyServiceOptions.KeyMemory[keyServiceRecord.Id], keyPosition, keyLength);
         } 
         else {
-            // Matrix key generation - just return a placeholder indicating Matrix type
-            // The actual key material should be obtained via GenerateKeyBytes which uses MatrixKeyGenerator
-            keyResult = keyServiceRecord.Id; // Just the key ID for now
+            // Matrix key generation — generate a start position, derive vectors deterministically,
+            // and encode both keyId and startPosition into the returned keyResult int.
+            var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
+            var matrixResult = matrixGenerator.GenerateKey(
+                keyServiceRecord.Value,
+                (byte)keyServiceRecord.Id,
+                KeySize128 // minimum size; only startPosition is needed from this call
+            );
+            keyResult = ApplyKeyIdMask(
+                keyServiceRecord.Id | (matrixResult.StartPosition << matrixStartPositionSize),
+                keyServiceRecord.KeyIdMask
+            );
             return ReadOnlyMemory<char>.Empty;
         }
     }
@@ -182,7 +195,11 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
             );
 
             matrixResult.KeyBytes.CopyTo(destination);
-            keyResult = keyServiceRecord.Id; // For Matrix keys, just return the key ID
+            // Encode keyId (bits 0-7) and startPosition (bits 8-30) into keyResult
+            keyResult = ApplyKeyIdMask(
+                keyServiceRecord.Id | (matrixResult.StartPosition << matrixStartPositionSize),
+                keyServiceRecord.KeyIdMask
+            );
         }
     }
 
@@ -207,7 +224,11 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
                 keySizeInBytes
             );
 
-            keyResult = keyServiceRecord.Id; // For Matrix keys, just return the key ID
+            // Encode keyId (bits 0-7) and startPosition (bits 8-30) into keyResult
+            keyResult = ApplyKeyIdMask(
+                keyServiceRecord.Id | (matrixResult.StartPosition << matrixStartPositionSize),
+                keyServiceRecord.KeyIdMask
+            );
             return matrixResult.KeyBytes;
         }
     }
@@ -232,35 +253,53 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
 
         if (keyServiceRecord.Type == Configuration.KeyType.Block) {
             int keyLength = minMaskLength + (RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
-                keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.MaxCharPosition);
-            //   0-255:8  0-1023:10    0-128:8        
+                keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.Value.Length);
+            //   0-255:8  0-1023:10    0-128:8
             //  [keyId][keyPosition][keyLength]
             var originalKeyResult = keyServiceRecord.Id +
                                     (keyPosition << keyPositionSize) +
                                     (keyLength << keyPositionAndLength);
             int maskedKeyResult = ApplyKeyIdMask(originalKeyResult, keyServiceRecord.KeyIdMask);
-            return Task.FromResult((KeyServiceOptions.KeyMemory[keyServiceRecord.Id].Slice(keyPosition, keyLength), maskedKeyResult));
+            var keyMaterial = GetBlockKeyMaterial(KeyServiceOptions.KeyMemory[keyServiceRecord.Id], keyPosition, keyLength);
+            return Task.FromResult((keyMaterial, maskedKeyResult));
         } 
         else {
-            // Matrix key - return empty memory
-            return Task.FromResult((ReadOnlyMemory<char>.Empty, keyServiceRecord.Id));
+            // Matrix key generation — encode startPosition for later reproduction
+            var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
+            var matrixResult = matrixGenerator.GenerateKey(
+                keyServiceRecord.Value,
+                (byte)keyServiceRecord.Id,
+                KeySize128 // minimum size; only startPosition is needed
+            );
+            int maskedKeyResult = ApplyKeyIdMask(
+                keyServiceRecord.Id | (matrixResult.StartPosition << matrixStartPositionSize),
+                keyServiceRecord.KeyIdMask
+            );
+            return Task.FromResult((ReadOnlyMemory<char>.Empty, maskedKeyResult));
         }
     }
 
     /// <summary>
-    /// Get the Key text from the Source Keys using the Key Id
+    /// Get the Key text from the Source Keys using the Key Id.
     /// </summary>
-    /// <param name="keyResult"></param>
-    /// <returns></returns>
+    /// <remarks>
+    /// Returns char material for Block keys only.
+    /// Matrix keys do not produce char-based output; call GetKeyBytes / GetKey128 / GetKey192 / GetKey256 instead.
+    /// </remarks>
     public ReadOnlyMemory<char> GetKey(int keyResult) {
         int keyId = keyResult & keyIdMask;
         var keyServiceRecord = GetKeyServiceRecord(keyId);
+
+        if (keyServiceRecord.Type == Configuration.KeyType.Matrix) {
+            return ReadOnlyMemory<char>.Empty;
+        }
+
         var unmaskedKeyResult = UnmaskKeyResult(keyResult, keyServiceRecord);
 
         int keyPosition = (unmaskedKeyResult >> keyPositionSize) & keyPositionMask,
             keyLength = (unmaskedKeyResult >> keyPositionAndLength) & keyLengthMask;
 
-        return KeyServiceOptions.KeyMemory[keyId].Slice(keyPosition, keyLength);
+        return GetBlockKeyMaterial(KeyServiceOptions.KeyMemory[keyId], keyPosition, keyLength);
     }
 
     public byte[] GetKey128(int keyResult, KeyDerivationOptions options = default) => GetKeyBytes(keyResult, KeySize128, options);
@@ -269,14 +308,35 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
 
     public void GetKeyBytes(int keyResult, Span<byte> destination, KeyDerivationOptions options = default) {
         ValidateKeySize(destination.Length);
-        var keyMaterial = GetKey(keyResult);
-        DeriveKeyBytes(keyMaterial, keyResult, destination, options);
+        int keyId = keyResult & keyIdMask;
+        var keyServiceRecord = GetKeyServiceRecord(keyId);
+
+        if (keyServiceRecord.Type == Configuration.KeyType.Matrix) {
+            var unmasked = ApplyKeyIdMask(keyResult, keyServiceRecord.KeyIdMask);
+            int startPosition = (unmasked >> matrixStartPositionSize) & matrixStartPositionMask;
+            var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
+            var matrixResult = matrixGenerator.RegenerateKey(keyServiceRecord.Value, (byte)keyId, startPosition, destination.Length);
+            matrixResult.KeyBytes.CopyTo(destination);
+        } else {
+            var keyMaterial = GetKey(keyResult);
+            DeriveKeyBytes(keyMaterial, keyResult, destination, options);
+        }
     }
 
     public byte[] GetKeyBytes(int keyResult, int keySizeInBytes, KeyDerivationOptions options = default) {
         ValidateKeySize(keySizeInBytes);
-        var keyMaterial = GetKey(keyResult);
-        return DeriveKeyBytes(keyMaterial, keyResult, keySizeInBytes, options);
+        int keyId = keyResult & keyIdMask;
+        var keyServiceRecord = GetKeyServiceRecord(keyId);
+
+        if (keyServiceRecord.Type == Configuration.KeyType.Matrix) {
+            var unmasked = ApplyKeyIdMask(keyResult, keyServiceRecord.KeyIdMask);
+            int startPosition = (unmasked >> matrixStartPositionSize) & matrixStartPositionMask;
+            var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
+            return matrixGenerator.RegenerateKey(keyServiceRecord.Value, (byte)keyId, startPosition, keySizeInBytes).KeyBytes;
+        } else {
+            var keyMaterial = GetKey(keyResult);
+            return DeriveKeyBytes(keyMaterial, keyResult, keySizeInBytes, options);
+        }
     }
 
     public void GetKey128(int keyResult, Span<byte> destination, KeyDerivationOptions options = default) {
@@ -297,12 +357,17 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
     public Task<ReadOnlyMemory<char>> GetKeyAsync(int keyResult) {
         int keyId = keyResult & keyIdMask;
         var keyServiceRecord = GetKeyServiceRecord(keyId);
+
+        if (keyServiceRecord.Type == Configuration.KeyType.Matrix) {
+            return Task.FromResult(ReadOnlyMemory<char>.Empty);
+        }
+
         var unmaskedKeyResult = UnmaskKeyResult(keyResult, keyServiceRecord);
 
         int keyPosition = (unmaskedKeyResult >> keyPositionSize) & keyPositionMask,
             keyLength = (unmaskedKeyResult >> keyPositionAndLength) & keyLengthMask;
 
-        return Task.FromResult(KeyServiceOptions.KeyMemory[keyId].Slice(keyPosition, keyLength));
+        return Task.FromResult(GetBlockKeyMaterial(KeyServiceOptions.KeyMemory[keyId], keyPosition, keyLength));
     }
 
     /// <summary>
@@ -367,11 +432,31 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
             throw new ArgumentOutOfRangeException(nameof(maskedKeyResult), "Decoded key length is outside supported range.");
         }
 
-        if (keyPosition < 0 || keyPosition + keyLength > keyServiceRecord.Value.Length) {
-            throw new ArgumentOutOfRangeException(nameof(maskedKeyResult), "Decoded key position and length are outside configured key bounds.");
+        if (keyPosition < 0 || keyPosition >= keyServiceRecord.Value.Length) {
+            throw new ArgumentOutOfRangeException(nameof(maskedKeyResult), "Decoded key position is outside configured key bounds.");
+        }
+
+        if (keyLength > keyServiceRecord.Value.Length) {
+            throw new ArgumentOutOfRangeException(nameof(maskedKeyResult), "Decoded key length cannot exceed configured source length.");
         }
 
         return unmaskedKeyResult;
+    }
+
+    private static ReadOnlyMemory<char> GetBlockKeyMaterial(ReadOnlyMemory<char> source, int keyPosition, int keyLength) {
+        var sourceSpan = source.Span;
+        int sourceLength = sourceSpan.Length;
+
+        if (keyPosition + keyLength <= sourceLength) {
+            return source.Slice(keyPosition, keyLength);
+        }
+
+        int firstSegmentLength = sourceLength - keyPosition;
+        int secondSegmentLength = keyLength - firstSegmentLength;
+        char[] wrapped = GC.AllocateUninitializedArray<char>(keyLength);
+        sourceSpan.Slice(keyPosition, firstSegmentLength).CopyTo(wrapped.AsSpan(0, firstSegmentLength));
+        sourceSpan.Slice(0, secondSegmentLength).CopyTo(wrapped.AsSpan(firstSegmentLength, secondSegmentLength));
+        return wrapped;
     }
 
     private static byte[] DeriveKeyBytes(ReadOnlyMemory<char> keyMaterial, int keyResult, int keySizeInBytes, KeyDerivationOptions options) {

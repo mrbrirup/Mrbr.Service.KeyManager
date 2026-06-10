@@ -5,7 +5,9 @@ using System.Runtime.CompilerServices;
 namespace Mrbr.Service.KeyManager.Matrices;
 
 /// <summary>
-/// Generates keys by walking a 3D matrix using random vectors.
+/// Generates keys by walking a 3D matrix using vectors derived deterministically
+/// from the start position and source text — enabling full key reproduction from
+/// a single compact token (keyId + startPosition).
 /// </summary>
 public class MatrixKeyGenerator {
     private readonly Configuration.KeyMatrixSettings _settings;
@@ -44,44 +46,37 @@ public class MatrixKeyGenerator {
     }
 
     /// <summary>
-    /// Generates a matrix key by walking the 3D space with random vectors.
+    /// Generates a matrix key using a random start position. Vectors are derived
+    /// deterministically from the start position and source text, so the returned
+    /// startPosition alone (combined with the source text) is sufficient to reproduce
+    /// identical key bytes via <see cref="RegenerateKey(string,byte,int,int)"/>.
     /// </summary>
     /// <param name="sourceText">Source text to use as matrix data</param>
     /// <param name="keyId">The key ID (0-255)</param>
-    /// <param name="maxTargetBytes">Target key size in bytes (typically 16, 24, or 32)</param>
-    /// <returns>Result containing the generated key bytes, start position, and vectors</returns>
+    /// <param name="maxTargetBytes">Target key size in bytes (16, 24, or 32)</param>
+    /// <returns>Result containing generated key bytes, start position, and derived vectors</returns>
     public unsafe MatrixKeyResult GenerateKey(string sourceText, byte keyId, int maxTargetBytes) {
-        // Build the flat matrix from source text
         byte[] flatMatrix = _builder.BuildFlatMatrix(sourceText);
 
-        // Generate random start position within matrix bounds
         int startX = RandomNumberGenerator.GetInt32(_settings.Width);
         int startY = RandomNumberGenerator.GetInt32(_settings.Height);
         int startZ = RandomNumberGenerator.GetInt32(_settings.Depth);
 
-        // Encode start position as single value: x + (y * width) + (z * width * height)
         int startPosition = startX + (startY * _settings.Width) + (startZ * _settings.Width * _settings.Height);
 
-        // Generate 16 random vectors (each 0-31, with 0=no-op, 31=stop)
-        byte[] vectors = GenerateRandomVectors(16);
+        // Derive vectors deterministically — same sourceText + startPosition always gives same vectors
+        byte[] vectors = DeriveVectors(sourceText, startPosition);
 
-        // Allocate result buffer
         byte[] keyBytes = new byte[maxTargetBytes];
 
-        // Walk the matrix using the generated vectors
         fixed (byte* pVectors = vectors)
         fixed (byte* pResult = keyBytes) {
             int bytesWritten = _walker.WalkMatrixUnsafe(
-                flatMatrix,
-                startX, startY, startZ,
-                pVectors,
-                pResult,
-                maxTargetBytes
+                flatMatrix, startX, startY, startZ,
+                pVectors, pResult, maxTargetBytes
             );
 
-            // If we didn't get enough bytes, fill remainder with deterministic data
             if (bytesWritten < maxTargetBytes) {
-                // Use remaining source material cyclically
                 for (int i = bytesWritten; i < maxTargetBytes; i++) {
                     keyBytes[i] = flatMatrix[i % flatMatrix.Length];
                 }
@@ -97,7 +92,53 @@ public class MatrixKeyGenerator {
     }
 
     /// <summary>
-    /// Recreates a key using a known start position and vectors.
+    /// Reproduces a key using only the start position. Vectors are re-derived
+    /// deterministically from sourceText and startPosition — no stored vectors needed.
+    /// This is the primary reproduction path used by KeyService.GetKeyBytes.
+    /// </summary>
+    /// <param name="sourceText">Source text to use as matrix data</param>
+    /// <param name="keyId">The key ID (0-255)</param>
+    /// <param name="startPosition">Encoded start position (from MatrixKeyResult or decoded keyResult)</param>
+    /// <param name="maxTargetBytes">Target key size in bytes</param>
+    /// <returns>Result containing the reproduced key bytes</returns>
+    public unsafe MatrixKeyResult RegenerateKey(string sourceText, byte keyId, int startPosition, int maxTargetBytes) {
+        byte[] flatMatrix = _builder.BuildFlatMatrix(sourceText);
+
+        byte[] vectors = DeriveVectors(sourceText, startPosition);
+
+        int startX = startPosition & _widthMask;
+        int remainder = startPosition >> GetBitCount(_widthMask);
+        int startY = remainder & _heightMask;
+        int startZ = remainder >> GetBitCount(_heightMask);
+
+        byte[] keyBytes = new byte[maxTargetBytes];
+
+        fixed (byte* pVectors = vectors)
+        fixed (byte* pResult = keyBytes) {
+            int bytesWritten = _walker.WalkMatrixUnsafe(
+                flatMatrix, startX, startY, startZ,
+                pVectors, pResult, maxTargetBytes
+            );
+
+            if (bytesWritten < maxTargetBytes) {
+                for (int i = bytesWritten; i < maxTargetBytes; i++) {
+                    keyBytes[i] = flatMatrix[i % flatMatrix.Length];
+                }
+            }
+        }
+
+        return new MatrixKeyResult {
+            KeyId = keyId,
+            StartPosition = startPosition,
+            Vectors = vectors,
+            KeyBytes = keyBytes
+        };
+    }
+
+    /// <summary>
+    /// Recreates a key using an explicit pre-supplied vector array.
+    /// Used for testing specific vector patterns; for normal reproduction
+    /// prefer <see cref="RegenerateKey(string,byte,int,int)"/>.
     /// </summary>
     /// <param name="sourceText">Source text to use as matrix data</param>
     /// <param name="keyId">The key ID (0-255)</param>
@@ -110,30 +151,22 @@ public class MatrixKeyGenerator {
             throw new ArgumentException("Vectors must be exactly 16 bytes.", nameof(vectors));
         }
 
-        // Build the flat matrix
         byte[] flatMatrix = _builder.BuildFlatMatrix(sourceText);
 
-        // Decode start position
         int startX = startPosition & _widthMask;
         int remainder = startPosition >> GetBitCount(_widthMask);
         int startY = remainder & _heightMask;
         int startZ = remainder >> GetBitCount(_heightMask);
 
-        // Allocate result buffer
         byte[] keyBytes = new byte[maxTargetBytes];
 
-        // Walk the matrix
         fixed (byte* pVectors = vectors)
         fixed (byte* pResult = keyBytes) {
             int bytesWritten = _walker.WalkMatrixUnsafe(
-                flatMatrix,
-                startX, startY, startZ,
-                pVectors,
-                pResult,
-                maxTargetBytes
+                flatMatrix, startX, startY, startZ,
+                pVectors, pResult, maxTargetBytes
             );
 
-            // Fill remainder if needed
             if (bytesWritten < maxTargetBytes) {
                 for (int i = bytesWritten; i < maxTargetBytes; i++) {
                     keyBytes[i] = flatMatrix[i % flatMatrix.Length];
@@ -150,16 +183,27 @@ public class MatrixKeyGenerator {
     }
 
     /// <summary>
-    /// Generates 16 random vector bytes, each in range 0-31.
-    /// Vector 0 = no-op, 1-26 = directional moves, 31 = stop marker.
+    /// Derives 16 deterministic vector bytes from the source text and start position
+    /// using HMAC-SHA256. The same inputs always produce the same 16 bytes, ensuring
+    /// full key reproduction without storing vectors.
     /// </summary>
-    private static byte[] GenerateRandomVectors(int count) {
-        byte[] vectors = new byte[count];
+    /// <param name="sourceText">Source text used as the HMAC key material</param>
+    /// <param name="startPosition">Start position used as HMAC data</param>
+    /// <returns>16 deterministic vector bytes (each clamped to 0-30, stop marker avoided)</returns>
+    public static byte[] DeriveVectors(string sourceText, int startPosition) {
+        // Hash the source text once as the stable HMAC key
+        byte[] sourceHash = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(sourceText));
 
-        for (int i = 0; i < count; i++) {
-            // Generate random value 0-30 (avoid 31 stop marker for most vectors)
-            // Last few vectors have higher chance of being movement vectors
-            vectors[i] = (byte)RandomNumberGenerator.GetInt32(0, 27);
+        // HMAC-SHA256 keyed by source hash, data is the 4-byte start position
+        Span<byte> positionBytes = stackalloc byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(positionBytes, startPosition);
+
+        byte[] hmac = HMACSHA256.HashData(sourceHash, positionBytes);
+
+        // Take first 16 bytes, clamp each to 0-30 (avoid stop marker 31)
+        byte[] vectors = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            vectors[i] = (byte)(hmac[i] % 31);
         }
 
         return vectors;
@@ -175,6 +219,7 @@ public class MatrixKeyGenerator {
         return count;
     }
 }
+
 
 /// <summary>
 /// Result of matrix key generation containing all necessary information to recreate the key.
