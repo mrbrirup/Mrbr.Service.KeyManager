@@ -1,10 +1,11 @@
 ﻿using Microsoft.Extensions.Options;
-using Mrbr.Service.KeyManager.Services;
 using Mrbr.Extensions.Configuration.Text;
+using Mrbr.Service.KeyManager.Services;
 using System.Globalization;
 using static Mrbr.Service.KeyManager.Services.KeyService;
 
 namespace Mrbr.Service.KeyManager.Configuration;
+
 public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
     private static KeyServiceRecord?[] _keys = default!;
     private static ReadOnlyMemory<char>[] _keyMemory = default!;
@@ -30,7 +31,7 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
     public static bool DeleteKey(int keyId) {
         lock (lockObject) {
             if (keyId < 0 || keyId >= KeyService.MaxKeyCount) {
-                throw new ArgumentOutOfRangeException(nameof(keyId), $"Key Id must be between 0 and {KeyService.MaxKeyCount - 1}");
+                throw new ArgumentOutOfRangeException(nameof(keyId), $"Key Id must be between 0 and {KeyService.MaxKeyCount - 1} (0-255)");
             }
             if (_keys[keyId] == null) return false; // Key does not exist
 
@@ -64,10 +65,43 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
             foreach (var keyServiceItem in this.Value) {
                 var keyIndex = keyServiceItem.Key;
                 if (keyIndex < 0 || keyIndex >= KeyService.MaxKeyCount) {
-                    throw new ArgumentOutOfRangeException(nameof(keyServiceItem.Key), $"Key Id must be between 0 and {KeyService.MaxKeyCount - 1}");
+                    throw new ArgumentOutOfRangeException(nameof(keyServiceItem.Key), $"Key Id must be between 0 and {KeyService.MaxKeyCount - 1} (0-255)");
                 }
+
+                // Validate the entry (type-specific settings)
+                keyServiceItem.Validate();
+
                 var parsedKeyIdMask = ParseKeyIdMask(keyServiceItem.KeyIdMask, keyIndex);
-                var keyServiceRecord = new KeyServiceRecord(keyIndex, keyServiceItem.Value!, keyServiceItem.Value.Length - KeyService.MaxMaskLength, parsedKeyIdMask);
+
+                // Create record based on key type
+                KeyServiceRecord keyServiceRecord;
+                if (keyServiceItem.Type == KeyType.Block) {
+                    keyServiceRecord = new KeyServiceRecord(
+                        keyIndex, 
+                        keyServiceItem.Value!, 
+                        keyServiceItem.Value.Length - KeyService.MaxMaskLength, 
+                        parsedKeyIdMask,
+                        KeyType.Block,
+                        keyServiceItem.BlockSettings,
+                        null
+                    );
+                } else if (keyServiceItem.Type == KeyType.Matrix) {
+                    // For Matrix keys, validate matrix settings
+                    keyServiceItem.MatrixSettings!.Validate();
+
+                    keyServiceRecord = new KeyServiceRecord(
+                        keyIndex, 
+                        keyServiceItem.Value!, 
+                        0, // MaxCharPosition not used for Matrix
+                        parsedKeyIdMask,
+                        KeyType.Matrix,
+                        null,
+                        keyServiceItem.MatrixSettings
+                    );
+                } else {
+                    throw new InvalidOperationException($"Unknown KeyType {keyServiceItem.Type} for key {keyIndex}.");
+                }
+
                 _keys[keyIndex] = keyServiceRecord;
                 _keyMemory[keyIndex] = keyServiceRecord.Value.AsMemory();
                 _keyCount++;

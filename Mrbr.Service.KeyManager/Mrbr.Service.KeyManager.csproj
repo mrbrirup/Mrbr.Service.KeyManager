@@ -8,10 +8,14 @@
 	</PropertyGroup>
 
 	<ItemGroup>		
-		<PackageReference Include="Mrbr.Extensions.Configuration" Version="1.0.8" />
+		<PackageReference Include="Mrbr.Extensions.Configuration" Version="1.0.8" />		
+		<PackageReference Include="Mrbr.SourceGenerators.Common" Version="1.0.0" />
 		<PackageReference Include="System.Configuration.ConfigurationManager" Version="11.0.0-preview.4.26230.115" />
 	</ItemGroup>
 	<ItemGroup>
 		<FrameworkReference Include="Microsoft.AspNetCore.App" />
+	</ItemGroup>
+	<ItemGroup>
+	  <Folder Include="ProjectDocumentation\" />
 	</ItemGroup>
 </Project>

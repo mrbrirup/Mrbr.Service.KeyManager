@@ -12,36 +12,55 @@ namespace Mrbr.Service.KeyManager.Services;
 /// </summary>
 public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDisposable {
     private KeyServiceOptions KeyServiceOptions { get; init; } = options;
-    public sealed record KeyServiceRecord(int Id, string Value, int MaxCharPosition, int KeyIdMask);
 
     /// <summary>
-    /// Maximum number of keys in collection
+    /// Record containing key configuration information.
     /// </summary>
-    public const int MaxKeyCount = 8;
+    /// <param name="Id">Key ID (0-255)</param>
+    /// <param name="Value">Source text for key generation</param>
+    /// <param name="MaxCharPosition">Maximum position for Block key extraction</param>
+    /// <param name="KeyIdMask">Obfuscation mask for key ID</param>
+    /// <param name="Type">Key generation type (Block or Matrix)</param>
+    /// <param name="BlockSettings">Block-specific settings (when Type is Block)</param>
+    /// <param name="MatrixSettings">Matrix-specific settings (when Type is Matrix)</param>
+    public sealed record KeyServiceRecord(
+        int Id, 
+        string Value, 
+        int MaxCharPosition, 
+        int KeyIdMask,
+        Configuration.KeyType Type,
+        Configuration.KeyBlockSettings? BlockSettings,
+        Configuration.KeyMatrixSettings? MatrixSettings
+    );
+
     /// <summary>
-    /// Binary Shift Size for Key
+    /// Maximum number of keys in collection (0-255)
     /// </summary>
-    public const int keyPositionSize = 3;
+    public const int MaxKeyCount = 256;
+    /// <summary>
+    /// Binary Shift Size for Key ID (8 bits for 256 keys)
+    /// </summary>
+    public const int keyPositionSize = 8;
     /// <summary>
     /// Binary Shift Size for Key Length    
     /// </summary>
     public const int keyLengthSize = 10;
     /// <summary>
-    /// Binary Mask for Key
+    /// Binary Mask for Key ID (0-255)
     /// </summary>
     /// <remarks>
-    /// 0-7:3  0-1023:10    0-128:8
+    /// Block format: 0-255:8  0-1023:10    0-128:8
     /// [keyId][keyPosition][keyLength]
     /// </remarks>
-    public const int keyIdMask = 7;
+    public const int keyIdMask = 255;
     /// <summary>
-    /// Minimum supported KeyIdMask value. Lowest 3 key-id bits must remain unset.
+    /// Minimum supported KeyIdMask value. Lowest 8 key-id bits must remain unset.
     /// </summary>
-    public const int MinKeyIdMaskValue = 8;
+    public const int MinKeyIdMaskValue = 256;
     /// <summary>
-    /// Maximum supported KeyIdMask value. Lowest 3 key-id bits must remain unset.
+    /// Maximum supported KeyIdMask value. Lowest 8 key-id bits must remain unset.
     /// </summary>
-    public const int MaxKeyIdMaskValue = int.MaxValue & ~7;
+    public const int MaxKeyIdMaskValue = int.MaxValue & ~255;
     /// <summary>
     /// Binary Mask for Key Position
     /// </summary>
@@ -72,8 +91,31 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
     public const int KeySize128 = 16;
     public const int KeySize192 = 24;
     public const int KeySize256 = 32;
+
     /// <summary>
-    /// Array of Keys. Large key source strings to pull keys from
+    /// Key Generation Architecture Notes:
+    /// 
+    /// BLOCK KEYS (1D Contiguous Extraction):
+    /// - Uses position and length encoding in keyResult (int):
+    ///   [keyId:8bits][keyPosition:10bits][keyLength:10bits] = 26 bits
+    /// - Direct slice from source text
+    /// - keyResult can be used to recreate the exact same key material
+    /// 
+    /// MATRIX KEYS (3D Vector-Based Navigation):
+    /// - Uses Matrices.MatrixKeyGenerator with OptimizedKeyWalker
+    /// - Generates fresh random vectors each time (not stored in keyResult)
+    /// - keyResult only contains the keyId (0-255)
+    /// - Full matrix key information stored in Matrices.MatrixKeyResult:
+    ///   * KeyId (1 byte)
+    ///   * StartPosition (10 bits / 2 bytes)
+    ///   * Vectors (16 bytes)
+    ///   * KeyBytes (generated output)
+    /// - To recreate Matrix keys, use MatrixKeyResult.EncodeToBytes() and DecodeFromBytes()
+    /// - Matrix keys generate cryptographically secure output directly; no derivation needed
+    /// </summary>
+
+    /// <summary>
+    /// Array of Keys. Large key source strings to pull keys from (0-255)
     /// </summary>
     /// <remarks>
     /// KeyId: Key
@@ -86,20 +128,32 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
     /// <param name="keyResult">Integer key to calculate size and position from</param>
     /// <returns>String value of key, as substring of the Key Source in the Keys dictionary</returns>
     /// <remarks>
-    /// 0-7:3  0-1023:10    0-128:8        
+    /// Block format: 0-255:8  0-1023:10    0-128:8        
     ///  [keyId][keyPosition][keyLength]
+    /// Note: For Matrix keys, this generates a random key but returns empty memory. 
+    /// Use GenerateKeyBytes() methods for actual cryptographic material.
     /// </remarks>
     public ReadOnlyMemory<char> GenerateKey(out int keyResult) {
         var keyServiceRecord = GetKeyServiceRecord(GetRandomKeyId());
-        int keyLength = minMaskLength + (RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
-            keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.MaxCharPosition);
-        //   0-7:3  0-1023:10    0-128:8        
-        //  [keyId][keyPosition][keyLength]
-        var originalKeyResult = keyServiceRecord.Id +
-                                (keyPosition << keyPositionSize) +
-                                (keyLength << keyPositionAndLength);
-        keyResult = ApplyKeyIdMask(originalKeyResult, keyServiceRecord.KeyIdMask);
-        return KeyServiceOptions.KeyMemory[keyServiceRecord.Id].Slice(keyPosition, keyLength);
+
+        if (keyServiceRecord.Type == Configuration.KeyType.Block) {
+            // Block key generation (original behavior)
+            int keyLength = minMaskLength + (RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
+                keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.MaxCharPosition);
+            //   0-255:8  0-1023:10    0-128:8        
+            //  [keyId][keyPosition][keyLength]
+            var originalKeyResult = keyServiceRecord.Id +
+                                    (keyPosition << keyPositionSize) +
+                                    (keyLength << keyPositionAndLength);
+            keyResult = ApplyKeyIdMask(originalKeyResult, keyServiceRecord.KeyIdMask);
+            return KeyServiceOptions.KeyMemory[keyServiceRecord.Id].Slice(keyPosition, keyLength);
+        } 
+        else {
+            // Matrix key generation - just return a placeholder indicating Matrix type
+            // The actual key material should be obtained via GenerateKeyBytes which uses MatrixKeyGenerator
+            keyResult = keyServiceRecord.Id; // Just the key ID for now
+            return ReadOnlyMemory<char>.Empty;
+        }
     }
 
     public byte[] GenerateKey128(out int keyResult, KeyDerivationOptions options = default) => GenerateKeyBytes(KeySize128, out keyResult, options);
@@ -108,14 +162,54 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
 
     public void GenerateKeyBytes(Span<byte> destination, out int keyResult, KeyDerivationOptions options = default) {
         ValidateKeySize(destination.Length);
-        var keyMaterial = GenerateKey(out keyResult);
-        DeriveKeyBytes(keyMaterial, keyResult, destination, options);
+
+        // Get a random key ID and check its type
+        int randomKeyId = GetRandomKeyId();
+        var keyServiceRecord = GetKeyServiceRecord(randomKeyId);
+
+        if (keyServiceRecord.Type == Configuration.KeyType.Block) {
+            // Block key generation (original path)
+            var keyMaterial = GenerateKey(out keyResult);
+            DeriveKeyBytes(keyMaterial, keyResult, destination, options);
+        } 
+        else {
+            // Matrix key generation using MatrixKeyGenerator
+            var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
+            var matrixResult = matrixGenerator.GenerateKey(
+                keyServiceRecord.Value, 
+                (byte)keyServiceRecord.Id, 
+                destination.Length
+            );
+
+            matrixResult.KeyBytes.CopyTo(destination);
+            keyResult = keyServiceRecord.Id; // For Matrix keys, just return the key ID
+        }
     }
 
     public byte[] GenerateKeyBytes(int keySizeInBytes, out int keyResult, KeyDerivationOptions options = default) {
         ValidateKeySize(keySizeInBytes);
-        var keyMaterial = GenerateKey(out keyResult);
-        return DeriveKeyBytes(keyMaterial, keyResult, keySizeInBytes, options);
+
+        // Get a random key ID and check its type
+        int randomKeyId = GetRandomKeyId();
+        var keyServiceRecord = GetKeyServiceRecord(randomKeyId);
+
+        if (keyServiceRecord.Type == Configuration.KeyType.Block) {
+            // Block key generation (original path)
+            var keyMaterial = GenerateKey(out keyResult);
+            return DeriveKeyBytes(keyMaterial, keyResult, keySizeInBytes, options);
+        } 
+        else {
+            // Matrix key generation using MatrixKeyGenerator
+            var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
+            var matrixResult = matrixGenerator.GenerateKey(
+                keyServiceRecord.Value, 
+                (byte)keyServiceRecord.Id, 
+                keySizeInBytes
+            );
+
+            keyResult = keyServiceRecord.Id; // For Matrix keys, just return the key ID
+            return matrixResult.KeyBytes;
+        }
     }
 
     public void GenerateKey128(Span<byte> destination, out int keyResult, KeyDerivationOptions options = default) {
@@ -135,15 +229,22 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
 
     public Task<(ReadOnlyMemory<char> Key, int Id)> GenerateKeyAsync() {
         var keyServiceRecord = GetKeyServiceRecord(GetRandomKeyId());
-        int keyLength = minMaskLength + (RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
-            keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.MaxCharPosition);
-        //   0-7:3  0-1023:10    0-128:8        
-        //  [keyId][keyPosition][keyLength]
-        var originalKeyResult = keyServiceRecord.Id +
-                                (keyPosition << keyPositionSize) +
-                                (keyLength << keyPositionAndLength);
-        int maskedKeyResult = ApplyKeyIdMask(originalKeyResult, keyServiceRecord.KeyIdMask);
-        return Task.FromResult((KeyServiceOptions.KeyMemory[keyServiceRecord.Id].Slice(keyPosition, keyLength), maskedKeyResult));
+
+        if (keyServiceRecord.Type == Configuration.KeyType.Block) {
+            int keyLength = minMaskLength + (RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
+                keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.MaxCharPosition);
+            //   0-255:8  0-1023:10    0-128:8        
+            //  [keyId][keyPosition][keyLength]
+            var originalKeyResult = keyServiceRecord.Id +
+                                    (keyPosition << keyPositionSize) +
+                                    (keyLength << keyPositionAndLength);
+            int maskedKeyResult = ApplyKeyIdMask(originalKeyResult, keyServiceRecord.KeyIdMask);
+            return Task.FromResult((KeyServiceOptions.KeyMemory[keyServiceRecord.Id].Slice(keyPosition, keyLength), maskedKeyResult));
+        } 
+        else {
+            // Matrix key - return empty memory
+            return Task.FromResult((ReadOnlyMemory<char>.Empty, keyServiceRecord.Id));
+        }
     }
 
     /// <summary>
@@ -205,35 +306,35 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
     }
 
     /// <summary>
-    /// Does the Key Service contain the Key Id
+    /// Does the Key Service contain the Key Id (0-255)
     /// </summary>
-    /// <param name="keyId"></param>
-    /// <returns></returns>
+    /// <param name="keyId">Key identifier (0-255)</param>
+    /// <returns>True if key exists</returns>
     public bool ContainsKey(int keyId) => keyId >= 0 && keyId < KeyService.MaxKeyCount && Keys[keyId] != null;
     /// <summary>
-    /// Delete the Key Id from the Key Manager
+    /// Delete the Key Id from the Key Manager (0-255)
     /// </summary>
-    /// <param name="keyId"></param>
-    /// <returns></returns>
+    /// <param name="keyId">Key identifier (0-255)</param>
+    /// <returns>True if key was deleted</returns>
     public bool DeleteKey(int keyId) => KeyServiceOptions.DeleteKey(keyId);
 
     /// <summary>
-    /// Delete all Keys from the Key Manager
+    /// Delete all Keys from the Key Manager (all 256 slots)
     /// </summary>
-    /// <returns></returns>
+    /// <returns>True if any keys were deleted</returns>
     public bool DeleteAllKeys() => KeyServiceOptions.DeleteAllKeys();
 
     /// <summary>
-    /// Get a Random Key Id
+    /// Get a Random Key Id (0-255)
     /// </summary>
-    /// <returns></returns>
+    /// <returns>Random key ID between 0 and 255</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int GetRandomKeyId() => RandomNumberGenerator.GetInt32(KeyCount);
     /// <summary>
-    /// Get the Key Service Record
+    /// Get the Key Service Record for a given key ID (0-255)
     /// </summary>
-    /// <param name="keyId"></param>
-    /// <returns></returns>
+    /// <param name="keyId">Key identifier (0-255)</param>
+    /// <returns>KeyServiceRecord containing key configuration</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static KeyServiceRecord GetKeyServiceRecord(int keyId) {
         if (keyId >= 0 && keyId < KeyService.MaxKeyCount) {
