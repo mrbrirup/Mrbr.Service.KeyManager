@@ -10,8 +10,15 @@ namespace Mrbr.Service.KeyManager.Services;
 /// <summary>
 /// Key Service Class
 /// </summary>
-public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDisposable {
-    private KeyServiceOptions KeyServiceOptions { get; init; } = options;
+//public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDisposable {
+public sealed class KeyService : IKeyService, IDisposable {
+    public KeyServiceOptions KeyServiceOptions { get; init; }
+    //public KeyServiceOptions KeyServiceOptions { get; init; } = options;
+
+    public KeyService(KeyServiceOptions options) {
+        this.KeyServiceOptions = options;
+    }
+
 
     /// <summary>
     /// Record containing key configuration information.
@@ -24,9 +31,9 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
     /// <param name="BlockSettings">Block-specific settings (when Type is Block)</param>
     /// <param name="MatrixSettings">Matrix-specific settings (when Type is Matrix)</param>
     public sealed record KeyServiceRecord(
-        int Id, 
-        string Value, 
-        int MaxCharPosition, 
+        int Id,
+        string Value,
+        int MaxCharPosition,
         int KeyIdMask,
         Configuration.KeyType Type,
         Configuration.KeyBlockSettings? BlockSettings,
@@ -40,11 +47,11 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
     /// <summary>
     /// Binary Shift Size for Key ID (8 bits for 256 keys)
     /// </summary>
-    public const int keyPositionSize = 8;
+    public const int keyPositionSize = 16;
     /// <summary>
     /// Binary Shift Size for Key Length    
     /// </summary>
-    public const int keyLengthSize = 10;
+    public const int keyLengthSize = 8;
     /// <summary>
     /// Binary Mask for Key ID (0-255)
     /// </summary>
@@ -64,11 +71,11 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
     /// <summary>
     /// Binary Mask for Key Position
     /// </summary>
-    public const int keyPositionMask = 1023;
+    public static readonly int keyPositionMask = 65_535;
     /// <summary>
     /// Binary Mask for Key Length
     /// </summary>
-    public const int keyLengthMask = 127;
+    public static readonly int keyLengthMask = 127;
     /// <summary>
     /// Minimum Mask Length
     /// </summary>
@@ -144,6 +151,8 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
             // Block key generation with wrap-around support
             int keyLength = minMaskLength + (RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
                 keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.Value.Length);
+
+            var test = (keyPosition << keyPositionSize);
             //   0-255:8  0-1023:10    0-128:8
             //  [keyId][keyPosition][keyLength]
             var originalKeyResult = keyServiceRecord.Id +
@@ -151,7 +160,7 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
                                     (keyLength << keyPositionAndLength);
             keyResult = ApplyKeyIdMask(originalKeyResult, keyServiceRecord.KeyIdMask);
             return GetBlockKeyMaterial(KeyServiceOptions.KeyMemory[keyServiceRecord.Id], keyPosition, keyLength);
-        } 
+        }
         else {
             // Matrix key generation — generate a start position, derive vectors deterministically,
             // and encode both keyId and startPosition into the returned keyResult int.
@@ -184,13 +193,13 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
             // Block key generation (original path)
             var keyMaterial = GenerateKey(out keyResult);
             DeriveKeyBytes(keyMaterial, keyResult, destination, options);
-        } 
+        }
         else {
             // Matrix key generation using MatrixKeyGenerator
             var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
             var matrixResult = matrixGenerator.GenerateKey(
-                keyServiceRecord.Value, 
-                (byte)keyServiceRecord.Id, 
+                keyServiceRecord.Value,
+                (byte)keyServiceRecord.Id,
                 destination.Length
             );
 
@@ -214,13 +223,13 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
             // Block key generation (original path)
             var keyMaterial = GenerateKey(out keyResult);
             return DeriveKeyBytes(keyMaterial, keyResult, keySizeInBytes, options);
-        } 
+        }
         else {
             // Matrix key generation using MatrixKeyGenerator
             var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
             var matrixResult = matrixGenerator.GenerateKey(
-                keyServiceRecord.Value, 
-                (byte)keyServiceRecord.Id, 
+                keyServiceRecord.Value,
+                (byte)keyServiceRecord.Id,
                 keySizeInBytes
             );
 
@@ -254,7 +263,7 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
         if (keyServiceRecord.Type == Configuration.KeyType.Block) {
             int keyLength = minMaskLength + (RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
                 keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.Value.Length);
-            //   0-255:8  0-1023:10    0-128:8
+            //   0-255:8  0-1023:20    0-128:8
             //  [keyId][keyPosition][keyLength]
             var originalKeyResult = keyServiceRecord.Id +
                                     (keyPosition << keyPositionSize) +
@@ -262,7 +271,7 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
             int maskedKeyResult = ApplyKeyIdMask(originalKeyResult, keyServiceRecord.KeyIdMask);
             var keyMaterial = GetBlockKeyMaterial(KeyServiceOptions.KeyMemory[keyServiceRecord.Id], keyPosition, keyLength);
             return Task.FromResult((keyMaterial, maskedKeyResult));
-        } 
+        }
         else {
             // Matrix key generation — encode startPosition for later reproduction
             var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
@@ -296,6 +305,8 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
 
         var unmaskedKeyResult = UnmaskKeyResult(keyResult, keyServiceRecord);
 
+
+
         int keyPosition = (unmaskedKeyResult >> keyPositionSize) & keyPositionMask,
             keyLength = (unmaskedKeyResult >> keyPositionAndLength) & keyLengthMask;
 
@@ -317,7 +328,8 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
             var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
             var matrixResult = matrixGenerator.RegenerateKey(keyServiceRecord.Value, (byte)keyId, startPosition, destination.Length);
             matrixResult.KeyBytes.CopyTo(destination);
-        } else {
+        }
+        else {
             var keyMaterial = GetKey(keyResult);
             DeriveKeyBytes(keyMaterial, keyResult, destination, options);
         }
@@ -333,7 +345,8 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
             int startPosition = (unmasked >> matrixStartPositionSize) & matrixStartPositionMask;
             var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
             return matrixGenerator.RegenerateKey(keyServiceRecord.Value, (byte)keyId, startPosition, keySizeInBytes).KeyBytes;
-        } else {
+        }
+        else {
             var keyMaterial = GetKey(keyResult);
             return DeriveKeyBytes(keyMaterial, keyResult, keySizeInBytes, options);
         }
@@ -414,7 +427,8 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int ApplyKeyIdMask(int keyResult, int keyMaskId) {
-        var effectiveMask = keyMaskId & ~keyIdMask;
+        //var effectiveMask = keyMaskId & ~keyIdMask;
+        var effectiveMask = keyMaskId;// & ~keyIdMask;
         return keyResult ^ effectiveMask;
     }
 
@@ -429,7 +443,7 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
         }
 
         if (keyLength < minMaskLength || keyLength > MaxMaskLength) {
-            throw new ArgumentOutOfRangeException(nameof(maskedKeyResult), "Decoded key length is outside supported range.");
+            //throw new ArgumentOutOfRangeException(nameof(maskedKeyResult), "Decoded key length is outside supported range.");
         }
 
         if (keyPosition < 0 || keyPosition >= keyServiceRecord.Value.Length) {

@@ -1,5 +1,4 @@
 ﻿using Microsoft.Extensions.Options;
-using Mrbr.Extensions.Configuration.Text;
 using Mrbr.Service.KeyManager.Services;
 using System.Globalization;
 using static Mrbr.Service.KeyManager.Services.KeyService;
@@ -16,8 +15,12 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
         this.Value = options.Value;
 
         foreach (var keyServiceEntry in Value) {
-            keyServiceEntry.Value = keyServiceEntry.Value.ParseConfig();
-            keyServiceEntry.KeyIdMask = (keyServiceEntry.KeyIdMask ?? "0").ParseConfig();
+            if (keyServiceEntry.Type == KeyType.Block) {
+                //var blockSettings = keyServiceEntry.BlockSettings ?? throw new InvalidOperationException($"BlockSettings must be provided for key {keyServiceEntry.Key} of type Block.");
+                //keyServiceEntry.Value = keyServiceEntry.Value.ParseConfig();
+                keyServiceEntry.Value = keyServiceEntry.Value;
+                keyServiceEntry.KeyIdMask = keyServiceEntry.KeyIdMask;
+            }
         }
 
 
@@ -77,28 +80,30 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
                 KeyServiceRecord keyServiceRecord;
                 if (keyServiceItem.Type == KeyType.Block) {
                     keyServiceRecord = new KeyServiceRecord(
-                        keyIndex, 
-                        keyServiceItem.Value!, 
-                        keyServiceItem.Value.Length - KeyService.MaxMaskLength, 
+                        keyIndex,
+                        keyServiceItem.Value!,
+                        keyServiceItem.Value.Length - KeyService.MaxMaskLength,
                         parsedKeyIdMask,
                         KeyType.Block,
                         keyServiceItem.BlockSettings,
                         null
                     );
-                } else if (keyServiceItem.Type == KeyType.Matrix) {
+                }
+                else if (keyServiceItem.Type == KeyType.Matrix) {
                     // For Matrix keys, validate matrix settings
                     keyServiceItem.MatrixSettings!.Validate();
 
                     keyServiceRecord = new KeyServiceRecord(
-                        keyIndex, 
-                        keyServiceItem.Value!, 
+                        keyIndex,
+                        keyServiceItem.Value!,
                         0, // MaxCharPosition not used for Matrix
                         parsedKeyIdMask,
                         KeyType.Matrix,
                         null,
                         keyServiceItem.MatrixSettings
                     );
-                } else {
+                }
+                else {
                     throw new InvalidOperationException($"Unknown KeyType {keyServiceItem.Type} for key {keyIndex}.");
                 }
 
