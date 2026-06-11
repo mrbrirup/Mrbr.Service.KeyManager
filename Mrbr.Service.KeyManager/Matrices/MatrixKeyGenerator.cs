@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Options;
-using System.Security.Cryptography;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 
 namespace Mrbr.Service.KeyManager.Matrices;
 
@@ -13,9 +13,9 @@ public class MatrixKeyGenerator {
     private readonly Configuration.KeyMatrixSettings _settings;
     private readonly OptimizedKeyWalker _walker;
     private readonly MatrixBuilder _builder;
-    private readonly int _widthMask;
-    private readonly int _heightMask;
-    private readonly int _depthMask;
+    private readonly ulong _widthMask;
+    private readonly ulong _heightMask;
+    private readonly ulong _depthMask;
 
     /// <summary>
     /// Initializes a new instance of MatrixKeyGenerator.
@@ -26,9 +26,9 @@ public class MatrixKeyGenerator {
         _walker = new OptimizedKeyWalker(options);
         _builder = new MatrixBuilder(options);
 
-        _widthMask = _settings.Width - 1;
-        _heightMask = _settings.Height - 1;
-        _depthMask = _settings.Depth - 1;
+        _widthMask = (ulong)_settings.Width - 1;
+        _heightMask = (ulong)_settings.Height - 1;
+        _depthMask = (ulong)_settings.Depth - 1;
     }
 
     /// <summary>
@@ -40,9 +40,9 @@ public class MatrixKeyGenerator {
         _walker = new OptimizedKeyWalker(Microsoft.Extensions.Options.Options.Create(settings));
         _builder = new MatrixBuilder(settings);
 
-        _widthMask = _settings.Width - 1;
-        _heightMask = _settings.Height - 1;
-        _depthMask = _settings.Depth - 1;
+        _widthMask = (ulong)_settings.Width - 1;
+        _heightMask = (ulong)_settings.Height - 1;
+        _depthMask = (ulong)_settings.Depth - 1;
     }
 
     /// <summary>
@@ -62,7 +62,7 @@ public class MatrixKeyGenerator {
         int startY = RandomNumberGenerator.GetInt32(_settings.Height);
         int startZ = RandomNumberGenerator.GetInt32(_settings.Depth);
 
-        int startPosition = startX + (startY * _settings.Width) + (startZ * _settings.Width * _settings.Height);
+        ulong startPosition = (ulong)startX + ((ulong)startY * (ulong)_settings.Width) + ((ulong)startZ * (ulong)_settings.Width * (ulong)_settings.Height);
 
         // Derive first directional vector from startPosition
         byte firstVector = DeriveFirstVector(sourceText, startPosition);
@@ -104,28 +104,28 @@ public class MatrixKeyGenerator {
     /// <param name="startPosition">Encoded start position (from MatrixKeyResult or decoded keyResult)</param>
     /// <param name="maxTargetBytes">Target key size in bytes</param>
     /// <returns>Result containing the reproduced key bytes</returns>
-    public unsafe MatrixKeyResult RegenerateKey(string sourceText, byte keyId, int startPosition, int maxTargetBytes) {
+    public unsafe MatrixKeyResult RegenerateKey(string sourceText, byte keyId, ulong startPosition, ulong maxTargetBytes) {
         byte[] flatMatrix = _builder.BuildFlatMatrix(sourceText);
 
         // Re-derive first vector from startPosition (deterministic)
         byte firstVector = DeriveFirstVector(sourceText, startPosition);
 
-        int startX = startPosition & _widthMask;
-        int remainder = startPosition >> GetBitCount(_widthMask);
-        int startY = remainder & _heightMask;
-        int startZ = remainder >> GetBitCount(_heightMask);
+        ulong startX = startPosition & _widthMask;
+        ulong remainder = startPosition / (1UL << (int)GetBitCount(_widthMask));
+        ulong startY = remainder & _heightMask;
+        ulong startZ = remainder / (1UL << (int)GetBitCount(_heightMask));
 
         byte[] keyBytes = new byte[maxTargetBytes];
 
         fixed (byte* pResult = keyBytes) {
             int bytesWritten = _walker.WalkMatrixDirectional(
-                flatMatrix, startX, startY, startZ,
-                firstVector, pResult, maxTargetBytes
+                flatMatrix, (int)startX, (int)startY, (int)startZ,
+                firstVector, pResult, (int)maxTargetBytes
             );
 
-            if (bytesWritten < maxTargetBytes) {
-                for (int i = bytesWritten; i < maxTargetBytes; i++) {
-                    keyBytes[i] = flatMatrix[i % flatMatrix.Length];
+            if ((ulong)bytesWritten < maxTargetBytes) {
+                for (ulong i = (ulong)bytesWritten; i < maxTargetBytes; i++) {
+                    keyBytes[i] = flatMatrix[i % (ulong)flatMatrix.Length];
                 }
             }
         }
@@ -152,17 +152,17 @@ public class MatrixKeyGenerator {
     /// <param name="vectors">16-byte vector array</param>
     /// <param name="maxTargetBytes">Target key size in bytes</param>
     /// <returns>Result containing the regenerated key bytes</returns>
-    public unsafe MatrixKeyResult RegenerateKey(string sourceText, byte keyId, int startPosition, byte[] vectors, int maxTargetBytes) {
+    public unsafe MatrixKeyResult RegenerateKey(string sourceText, byte keyId, ulong startPosition, byte[] vectors, int maxTargetBytes) {
         if (vectors.Length != 16) {
             throw new ArgumentException("Vectors must be exactly 16 bytes.", nameof(vectors));
         }
 
         byte[] flatMatrix = _builder.BuildFlatMatrix(sourceText);
 
-        int startX = startPosition & _widthMask;
-        int remainder = startPosition >> GetBitCount(_widthMask);
-        int startY = remainder & _heightMask;
-        int startZ = remainder >> GetBitCount(_heightMask);
+        int startX = (int)(startPosition & _widthMask);
+        ulong remainder = startPosition / (1UL << (int)GetBitCount(_widthMask));
+        int startY = (int)(remainder & _heightMask);
+        int startZ = (int)(remainder / (1UL << (int)GetBitCount(_heightMask)));
 
         byte[] keyBytes = new byte[maxTargetBytes];
 
@@ -223,13 +223,13 @@ public class MatrixKeyGenerator {
     /// <param name="sourceText">Source text used as the HMAC key material</param>
     /// <param name="startPosition">Start position used as HMAC data</param>
     /// <returns>Single 6-bit directional vector (0x00-0x2A, avoiding 0x3F stop marker)</returns>
-    public static byte DeriveFirstVector(string sourceText, int startPosition) {
+    public static byte DeriveFirstVector(string sourceText, ulong startPosition) {
         // Hash the source text once as the stable HMAC key
         byte[] sourceHash = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(sourceText));
 
         // HMAC-SHA256 keyed by source hash, data is the 4-byte start position
         Span<byte> positionBytes = stackalloc byte[4];
-        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(positionBytes, startPosition);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(positionBytes, (int)startPosition);
 
         byte[] hmac = HMACSHA256.HashData(sourceHash, positionBytes);
 
@@ -250,8 +250,8 @@ public class MatrixKeyGenerator {
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int GetBitCount(int mask) {
-        int count = 0;
+    private static ulong GetBitCount(ulong mask) {
+        ulong count = 0;
         while (mask > 0) {
             count++;
             mask >>= 1;
@@ -273,7 +273,7 @@ public class MatrixKeyResult {
     /// <summary>
     /// Encoded start position in the matrix (10 bits: x + y*width + z*width*height).
     /// </summary>
-    public int StartPosition { get; init; }
+    public ulong StartPosition { get; init; }
 
     /// <summary>
     /// 16-byte vector array defining the walk path.
@@ -313,7 +313,7 @@ public class MatrixKeyResult {
 
         return new MatrixKeyResult {
             KeyId = keyId,
-            StartPosition = startPosition,
+            StartPosition = (ulong)startPosition,
             Vectors = vectors
         };
     }

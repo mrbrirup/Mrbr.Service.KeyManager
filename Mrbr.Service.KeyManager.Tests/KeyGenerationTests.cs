@@ -89,7 +89,7 @@ public class KeyGenerationTests {
         Assert.Equal(42, result.KeyId);
         Assert.Equal(32, result.KeyBytes.Length);
         Assert.Equal(1, result.Vectors.Length); // Directional walk now stores only first vector
-        Assert.InRange(result.StartPosition, 0, 16 * 16 * 8 - 1);
+        Assert.InRange(result.StartPosition, 0UL, 16UL * 16UL * 8UL - 1UL);
     }
 
     [Fact]
@@ -303,7 +303,7 @@ public class KeyGenerationTests {
         var service = new KeyService(options);
 
         // Act
-        byte[] generated = service.GenerateKey256(out int keyResult);
+        byte[] generated = service.GenerateKey256(out ulong keyResult);
         byte[] retrieved = service.GetKey256(keyResult);
 
         _output.WriteLine($"Block keyResult: {keyResult}");
@@ -311,7 +311,7 @@ public class KeyGenerationTests {
         _output.WriteLine($"Block retrieved (hex): {Convert.ToHexString(retrieved)}");
 
         // Assert
-        Assert.Equal(0, keyResult & KeyService.keyIdMask);
+        Assert.Equal(0UL, keyResult & KeyService.keyIdMask);
         Assert.Equal(generated, retrieved);
     }
 
@@ -338,7 +338,7 @@ public class KeyGenerationTests {
         var service = new KeyService(options);
 
         // Act
-        byte[] signResult = service.GenerateKey256(out int keyResult);
+        byte[] signResult = service.GenerateKey256(out ulong keyResult);
         byte[] checkResult = service.GetKey256(keyResult);
 
         _output.WriteLine($"Matrix keyResult:          {keyResult}");
@@ -348,7 +348,7 @@ public class KeyGenerationTests {
         _output.WriteLine($"Matrix CheckResult (bytes): {Encoding.UTF8.GetString(checkResult)}");
 
         // Assert: signing and checking produce identical key bytes
-        Assert.Equal(0, keyResult & KeyService.keyIdMask);
+        Assert.Equal(0UL, keyResult & KeyService.keyIdMask);
         Assert.Equal(signResult, checkResult);
     }
 
@@ -378,8 +378,8 @@ public class KeyGenerationTests {
             _ => 32
         };
 
-        byte[] signResult = service.GenerateKeyBytes(keySizeInBytes, out int keyResult);
-        byte[] checkResult = service.GetKeyBytes(keyResult, keySizeInBytes);
+        byte[] signResult = service.GenerateKeyBytes(keySizeInBytes, out ulong keyResult);
+        byte[] checkResult = service.GetKeyBytes(keyResult, (ulong)keySizeInBytes);
 
         _output.WriteLine($"Matrix iter={iteration}, keyResult={keyResult}, keySize={keySizeInBytes}");
         _output.WriteLine($"Matrix SignResult: {Encoding.UTF8.GetString(signResult)}");
@@ -406,11 +406,11 @@ public class KeyGenerationTests {
         var service = new KeyService(options);
 
         // Act
-        byte[] signResult = service.GenerateKey256(out int keyResult);
+        byte[] signResult = service.GenerateKey256(out ulong keyResult);
         byte[] checkResult = service.GetKey256(keyResult);
 
         // Trace first vector and first few leg bytes
-        int startPosition = (keyResult >> KeyService.matrixStartPositionSize) & KeyService.matrixStartPositionMask;
+        ulong startPosition = (keyResult / (1UL << KeyService.matrixStartPositionSize)) & KeyService.matrixStartPositionMask;
         byte firstVector = MatrixKeyGenerator.DeriveFirstVector(sourceText, startPosition);
 
         int dx = DecodeVectorComponentPublic((byte)((firstVector >> 4) & 0x3));
@@ -466,8 +466,8 @@ public class KeyGenerationTests {
         byte[] vectors = GenerateRandomVectors(16);
 
         // Act
-        var first = generator.RegenerateKey(sourceText, keyId, startPosition, vectors, keyLength);
-        var second = generator.RegenerateKey(sourceText, keyId, startPosition, vectors, keyLength);
+        var first = generator.RegenerateKey(sourceText, keyId, (ulong)startPosition, vectors, keyLength);
+        var second = generator.RegenerateKey(sourceText, keyId, (ulong)startPosition, vectors, keyLength);
 
         //if (iteration < 5) {
         _output.WriteLine($"Matrix iter={iteration}, keyId={keyId}, startPosition={startPosition}, keyLength={keyLength}, vectors={Convert.ToHexString(vectors)}");
@@ -478,8 +478,8 @@ public class KeyGenerationTests {
         // Assert
         Assert.Equal(keyId, first.KeyId);
         Assert.Equal(keyId, second.KeyId);
-        Assert.Equal(startPosition, first.StartPosition);
-        Assert.Equal(startPosition, second.StartPosition);
+        Assert.Equal((ulong)startPosition, first.StartPosition);
+        Assert.Equal((ulong)startPosition, second.StartPosition);
         Assert.Equal(first.KeyBytes, second.KeyBytes);
     }
 
@@ -502,8 +502,8 @@ public class KeyGenerationTests {
         byte[] wrapVectors = [1, 3, 5, 1, 3, 5, 7, 11, 15, 19, 23, 25, 26, 1, 3, 5];
 
         // Act
-        var first = generator.RegenerateKey(sourceText, keyId: 77, startPosition, wrapVectors, 32);
-        var second = generator.RegenerateKey(sourceText, keyId: 77, startPosition, wrapVectors, 32);
+        var first = generator.RegenerateKey(sourceText, keyId: 77, (ulong)startPosition, wrapVectors, 32);
+        var second = generator.RegenerateKey(sourceText, keyId: 77, (ulong)startPosition, wrapVectors, 32);
 
         _output.WriteLine($"Matrix wrap keyId=77, startPosition={startPosition}, vectors={Convert.ToHexString(wrapVectors)}");
         _output.WriteLine($"Matrix wrap first (bytes):  {Encoding.UTF8.GetString(first.KeyBytes)}");
@@ -538,7 +538,7 @@ public class KeyGenerationTests {
         int keyResult = keyId + (keyPosition << KeyService.keyPositionSize) + (keyLength << KeyService.keyPositionAndLength);
 
         // Act
-        var key = service.GetKey(keyResult);
+        var key = service.GetKey((ulong)keyResult);
         string actual = new string(key.Span);
 
         string expected = BuildExpectedBlockMaterial(sourceText, keyPosition, keyLength);
@@ -573,7 +573,7 @@ public class KeyGenerationTests {
 
         int keyPosition = RandomNumberGenerator.GetInt32(0, sourceText.Length);
         int keyLength = RandomNumberGenerator.GetInt32(64, 128);
-        int keyResult = (keyPosition << KeyService.keyPositionSize) + (keyLength << KeyService.keyPositionAndLength);
+        ulong keyResult = (ulong)((keyPosition << KeyService.keyPositionSize) + (keyLength << KeyService.keyPositionAndLength));
 
         var key = service.GetKey(keyResult);
         string actual = new string(key.Span);
@@ -657,11 +657,11 @@ public class KeyGenerationTests {
     public void MatrixKeyGenerator_DeriveFirstVector_Deterministic() {
         // Arrange
         string sourceText = BuildAsciiSourceText(1024);
-        int startPosition = 100;
+        var startPosition = 100;
 
         // Act
-        byte vector1 = MatrixKeyGenerator.DeriveFirstVector(sourceText, startPosition);
-        byte vector2 = MatrixKeyGenerator.DeriveFirstVector(sourceText, startPosition);
+        byte vector1 = MatrixKeyGenerator.DeriveFirstVector(sourceText, (ulong)startPosition);
+        byte vector2 = MatrixKeyGenerator.DeriveFirstVector(sourceText, (ulong)startPosition);
 
         // Assert
         Assert.Equal(vector1, vector2);

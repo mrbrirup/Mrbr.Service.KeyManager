@@ -31,9 +31,9 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
     public static ReadOnlyMemory<char>[] KeyMemory => _keyMemory;
     public static int KeyCount => _keyCount;
 
-    public static bool DeleteKey(int keyId) {
+    public static bool DeleteKey(ulong keyId) {
         lock (lockObject) {
-            if (keyId < 0 || keyId >= KeyService.MaxKeyCount) {
+            if (keyId >= KeyService.MaxKeyCount) {
                 throw new ArgumentOutOfRangeException(nameof(keyId), $"Key Id must be between 0 and {KeyService.MaxKeyCount - 1} (0-255)");
             }
             if (_keys[keyId] == null) return false; // Key does not exist

@@ -1,4 +1,5 @@
-﻿using Mrbr.Service.KeyManager.Configuration;
+﻿using Mrbr.Service.KeyManager.Compression;
+using Mrbr.Service.KeyManager.Configuration;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
@@ -144,21 +145,21 @@ public sealed class KeyService : IKeyService, IDisposable {
     /// Note: For Matrix keys, this generates a random key but returns empty memory. 
     /// Use GenerateKeyBytes() methods for actual cryptographic material.
     /// </remarks>
-    public ReadOnlyMemory<char> GenerateKey(out int keyResult) {
+    public ReadOnlyMemory<char> GenerateKey(out ulong keyResult) {
         var keyServiceRecord = GetKeyServiceRecord(GetRandomKeyId());
 
         if (keyServiceRecord.Type == Configuration.KeyType.Block) {
             // Block key generation with wrap-around support
-            int keyLength = minMaskLength + (RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
-                keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.Value.Length);
+            ulong keyLength = (ulong)minMaskLength + (ulong)(RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
+                keyPosition = (ulong)RandomNumberGenerator.GetInt32(keyServiceRecord.Value.Length);
 
             var test = (keyPosition << keyPositionSize);
             //   0-255:8  0-1023:10    0-128:8
             //  [keyId][keyPosition][keyLength]
-            var originalKeyResult = keyServiceRecord.Id +
+            var originalKeyResult = (ulong)keyServiceRecord.Id +
                                     (keyPosition << keyPositionSize) +
                                     (keyLength << keyPositionAndLength);
-            keyResult = ApplyKeyIdMask(originalKeyResult, keyServiceRecord.KeyIdMask);
+            keyResult = ApplyKeyIdMask((ulong)originalKeyResult, (ulong)keyServiceRecord.KeyIdMask);
             return GetBlockKeyMaterial(KeyServiceOptions.KeyMemory[keyServiceRecord.Id], keyPosition, keyLength);
         }
         else {
@@ -171,22 +172,22 @@ public sealed class KeyService : IKeyService, IDisposable {
                 KeySize128 // minimum size; only startPosition is needed from this call
             );
             keyResult = ApplyKeyIdMask(
-                keyServiceRecord.Id | (matrixResult.StartPosition << matrixStartPositionSize),
-                keyServiceRecord.KeyIdMask
+                (ulong)keyServiceRecord.Id | (matrixResult.StartPosition << matrixStartPositionSize),
+                (ulong)keyServiceRecord.KeyIdMask
             );
             return ReadOnlyMemory<char>.Empty;
         }
     }
 
-    public byte[] GenerateKey128(out int keyResult, KeyDerivationOptions options = default) => GenerateKeyBytes(KeySize128, out keyResult, options);
-    public byte[] GenerateKey192(out int keyResult, KeyDerivationOptions options = default) => GenerateKeyBytes(KeySize192, out keyResult, options);
-    public byte[] GenerateKey256(out int keyResult, KeyDerivationOptions options = default) => GenerateKeyBytes(KeySize256, out keyResult, options);
+    public byte[] GenerateKey128(out ulong keyResult, KeyDerivationOptions options = default) => GenerateKeyBytes(KeySize128, out keyResult, options);
+    public byte[] GenerateKey192(out ulong keyResult, KeyDerivationOptions options = default) => GenerateKeyBytes(KeySize192, out keyResult, options);
+    public byte[] GenerateKey256(out ulong keyResult, KeyDerivationOptions options = default) => GenerateKeyBytes(KeySize256, out keyResult, options);
 
-    public void GenerateKeyBytes(Span<byte> destination, out int keyResult, KeyDerivationOptions options = default) {
-        ValidateKeySize(destination.Length);
+    public void GenerateKeyBytes(Span<byte> destination, out ulong keyResult, KeyDerivationOptions options = default) {
+        ValidateKeySize((ulong)destination.Length);
 
         // Get a random key ID and check its type
-        int randomKeyId = GetRandomKeyId();
+        var randomKeyId = GetRandomKeyId();
         var keyServiceRecord = GetKeyServiceRecord(randomKeyId);
 
         if (keyServiceRecord.Type == Configuration.KeyType.Block) {
@@ -206,23 +207,23 @@ public sealed class KeyService : IKeyService, IDisposable {
             matrixResult.KeyBytes.CopyTo(destination);
             // Encode keyId (bits 0-7) and startPosition (bits 8-30) into keyResult
             keyResult = ApplyKeyIdMask(
-                keyServiceRecord.Id | (matrixResult.StartPosition << matrixStartPositionSize),
-                keyServiceRecord.KeyIdMask
+                (ulong)keyServiceRecord.Id | (matrixResult.StartPosition << matrixStartPositionSize),
+                (ulong)keyServiceRecord.KeyIdMask
             );
         }
     }
 
-    public byte[] GenerateKeyBytes(int keySizeInBytes, out int keyResult, KeyDerivationOptions options = default) {
-        ValidateKeySize(keySizeInBytes);
+    public byte[] GenerateKeyBytes(int keySizeInBytes, out ulong keyResult, KeyDerivationOptions options = default) {
+        ValidateKeySize((ulong)keySizeInBytes);
 
         // Get a random key ID and check its type
-        int randomKeyId = GetRandomKeyId();
+        var randomKeyId = GetRandomKeyId();
         var keyServiceRecord = GetKeyServiceRecord(randomKeyId);
 
         if (keyServiceRecord.Type == Configuration.KeyType.Block) {
             // Block key generation (original path)
             var keyMaterial = GenerateKey(out keyResult);
-            return DeriveKeyBytes(keyMaterial, keyResult, keySizeInBytes, options);
+            return DeriveKeyBytes(keyMaterial, keyResult, (ulong)keySizeInBytes, options);
         }
         else {
             // Matrix key generation using MatrixKeyGenerator
@@ -235,40 +236,38 @@ public sealed class KeyService : IKeyService, IDisposable {
 
             // Encode keyId (bits 0-7) and startPosition (bits 8-30) into keyResult
             keyResult = ApplyKeyIdMask(
-                keyServiceRecord.Id | (matrixResult.StartPosition << matrixStartPositionSize),
-                keyServiceRecord.KeyIdMask
+                (ulong)keyServiceRecord.Id | ((ulong)matrixResult.StartPosition << matrixStartPositionSize),
+                (ulong)keyServiceRecord.KeyIdMask
             );
             return matrixResult.KeyBytes;
         }
     }
 
-    public void GenerateKey128(Span<byte> destination, out int keyResult, KeyDerivationOptions options = default) {
+    public void GenerateKey128(Span<byte> destination, out ulong keyResult, KeyDerivationOptions options = default) {
         ValidateNamedKeySize(destination.Length, KeySize128);
         GenerateKeyBytes(destination, out keyResult, options);
     }
 
-    public void GenerateKey192(Span<byte> destination, out int keyResult, KeyDerivationOptions options = default) {
+    public void GenerateKey192(Span<byte> destination, out ulong keyResult, KeyDerivationOptions options = default) {
         ValidateNamedKeySize(destination.Length, KeySize192);
         GenerateKeyBytes(destination, out keyResult, options);
     }
 
-    public void GenerateKey256(Span<byte> destination, out int keyResult, KeyDerivationOptions options = default) {
+    public void GenerateKey256(Span<byte> destination, out ulong keyResult, KeyDerivationOptions options = default) {
         ValidateNamedKeySize(destination.Length, KeySize256);
         GenerateKeyBytes(destination, out keyResult, options);
     }
 
-    public Task<(ReadOnlyMemory<char> Key, int Id)> GenerateKeyAsync() {
+    public Task<(ReadOnlyMemory<char> Key, ulong Id)> GenerateKeyAsync() {
         var keyServiceRecord = GetKeyServiceRecord(GetRandomKeyId());
 
         if (keyServiceRecord.Type == Configuration.KeyType.Block) {
-            int keyLength = minMaskLength + (RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
-                keyPosition = RandomNumberGenerator.GetInt32(keyServiceRecord.Value.Length);
+            ulong keyLength = (ulong)minMaskLength + (ulong)(RandomNumberGenerator.GetInt32(randomMaskLength) << 1),
+                keyPosition = (ulong)RandomNumberGenerator.GetInt32(keyServiceRecord.Value.Length);
             //   0-255:8  0-1023:20    0-128:8
             //  [keyId][keyPosition][keyLength]
-            var originalKeyResult = keyServiceRecord.Id +
-                                    (keyPosition << keyPositionSize) +
-                                    (keyLength << keyPositionAndLength);
-            int maskedKeyResult = ApplyKeyIdMask(originalKeyResult, keyServiceRecord.KeyIdMask);
+            var originalKeyResult = BitPacker.BlockKeyPack((uint)keyServiceRecord.Id, (uint)keyPosition, (uint)keyLength);
+            var maskedKeyResult = ApplyKeyIdMask(originalKeyResult, (ulong)keyServiceRecord.KeyIdMask);
             var keyMaterial = GetBlockKeyMaterial(KeyServiceOptions.KeyMemory[keyServiceRecord.Id], keyPosition, keyLength);
             return Task.FromResult((keyMaterial, maskedKeyResult));
         }
@@ -280,9 +279,9 @@ public sealed class KeyService : IKeyService, IDisposable {
                 (byte)keyServiceRecord.Id,
                 KeySize128 // minimum size; only startPosition is needed
             );
-            int maskedKeyResult = ApplyKeyIdMask(
-                keyServiceRecord.Id | (matrixResult.StartPosition << matrixStartPositionSize),
-                keyServiceRecord.KeyIdMask
+            ulong maskedKeyResult = ApplyKeyIdMask(
+                (ulong)keyServiceRecord.Id | ((ulong)matrixResult.StartPosition << matrixStartPositionSize),
+                (ulong)keyServiceRecord.KeyIdMask
             );
             return Task.FromResult((ReadOnlyMemory<char>.Empty, maskedKeyResult));
         }
@@ -295,8 +294,8 @@ public sealed class KeyService : IKeyService, IDisposable {
     /// Returns char material for Block keys only.
     /// Matrix keys do not produce char-based output; call GetKeyBytes / GetKey128 / GetKey192 / GetKey256 instead.
     /// </remarks>
-    public ReadOnlyMemory<char> GetKey(int keyResult) {
-        int keyId = keyResult & keyIdMask;
+    public ReadOnlyMemory<char> GetKey(ulong keyResult) {
+        var keyId = keyResult & keyIdMask;
         var keyServiceRecord = GetKeyServiceRecord(keyId);
 
         if (keyServiceRecord.Type == Configuration.KeyType.Matrix) {
@@ -305,28 +304,26 @@ public sealed class KeyService : IKeyService, IDisposable {
 
         var unmaskedKeyResult = UnmaskKeyResult(keyResult, keyServiceRecord);
 
+        BitPacker.BlockKeyUnpack(keyResult, out _, out var keyPosition, out var keyLength);
 
-
-        int keyPosition = (unmaskedKeyResult >> keyPositionSize) & keyPositionMask,
-            keyLength = (unmaskedKeyResult >> keyPositionAndLength) & keyLengthMask;
 
         return GetBlockKeyMaterial(KeyServiceOptions.KeyMemory[keyId], keyPosition, keyLength);
     }
 
-    public byte[] GetKey128(int keyResult, KeyDerivationOptions options = default) => GetKeyBytes(keyResult, KeySize128, options);
-    public byte[] GetKey192(int keyResult, KeyDerivationOptions options = default) => GetKeyBytes(keyResult, KeySize192, options);
-    public byte[] GetKey256(int keyResult, KeyDerivationOptions options = default) => GetKeyBytes(keyResult, KeySize256, options);
+    public byte[] GetKey128(ulong keyResult, KeyDerivationOptions options = default) => GetKeyBytes(keyResult, KeySize128, options);
+    public byte[] GetKey192(ulong keyResult, KeyDerivationOptions options = default) => GetKeyBytes(keyResult, KeySize192, options);
+    public byte[] GetKey256(ulong keyResult, KeyDerivationOptions options = default) => GetKeyBytes(keyResult, KeySize256, options);
 
-    public void GetKeyBytes(int keyResult, Span<byte> destination, KeyDerivationOptions options = default) {
-        ValidateKeySize(destination.Length);
-        int keyId = keyResult & keyIdMask;
+    public void GetKeyBytes(ulong keyResult, Span<byte> destination, KeyDerivationOptions options = default) {
+        ValidateKeySize((ulong)destination.Length);
+        var keyId = keyResult & keyIdMask;
         var keyServiceRecord = GetKeyServiceRecord(keyId);
 
         if (keyServiceRecord.Type == Configuration.KeyType.Matrix) {
-            var unmasked = ApplyKeyIdMask(keyResult, keyServiceRecord.KeyIdMask);
-            int startPosition = (unmasked >> matrixStartPositionSize) & matrixStartPositionMask;
+            var unmasked = ApplyKeyIdMask(keyResult, (ulong)keyServiceRecord.KeyIdMask);
+            BitPacker.BlockKeyUnpack(unmasked, out _, out var startPosition, out _);
             var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
-            var matrixResult = matrixGenerator.RegenerateKey(keyServiceRecord.Value, (byte)keyId, startPosition, destination.Length);
+            var matrixResult = matrixGenerator.RegenerateKey(keyServiceRecord.Value, (byte)keyId, startPosition, (ulong)destination.Length);
             matrixResult.KeyBytes.CopyTo(destination);
         }
         else {
@@ -335,14 +332,14 @@ public sealed class KeyService : IKeyService, IDisposable {
         }
     }
 
-    public byte[] GetKeyBytes(int keyResult, int keySizeInBytes, KeyDerivationOptions options = default) {
+    public byte[] GetKeyBytes(ulong keyResult, ulong keySizeInBytes, KeyDerivationOptions options = default) {
         ValidateKeySize(keySizeInBytes);
-        int keyId = keyResult & keyIdMask;
+        var keyId = keyResult & keyIdMask;
         var keyServiceRecord = GetKeyServiceRecord(keyId);
 
         if (keyServiceRecord.Type == Configuration.KeyType.Matrix) {
-            var unmasked = ApplyKeyIdMask(keyResult, keyServiceRecord.KeyIdMask);
-            int startPosition = (unmasked >> matrixStartPositionSize) & matrixStartPositionMask;
+            var unmasked = ApplyKeyIdMask(keyResult, (ulong)keyServiceRecord.KeyIdMask);
+            BitPacker.BlockKeyUnpack(unmasked, out _, out var startPosition, out _);
             var matrixGenerator = new Matrices.MatrixKeyGenerator(keyServiceRecord.MatrixSettings!);
             return matrixGenerator.RegenerateKey(keyServiceRecord.Value, (byte)keyId, startPosition, keySizeInBytes).KeyBytes;
         }
@@ -352,23 +349,23 @@ public sealed class KeyService : IKeyService, IDisposable {
         }
     }
 
-    public void GetKey128(int keyResult, Span<byte> destination, KeyDerivationOptions options = default) {
+    public void GetKey128(ulong keyResult, Span<byte> destination, KeyDerivationOptions options = default) {
         ValidateNamedKeySize(destination.Length, KeySize128);
         GetKeyBytes(keyResult, destination, options);
     }
 
-    public void GetKey192(int keyResult, Span<byte> destination, KeyDerivationOptions options = default) {
+    public void GetKey192(ulong keyResult, Span<byte> destination, KeyDerivationOptions options = default) {
         ValidateNamedKeySize(destination.Length, KeySize192);
         GetKeyBytes(keyResult, destination, options);
     }
 
-    public void GetKey256(int keyResult, Span<byte> destination, KeyDerivationOptions options = default) {
+    public void GetKey256(ulong keyResult, Span<byte> destination, KeyDerivationOptions options = default) {
         ValidateNamedKeySize(destination.Length, KeySize256);
         GetKeyBytes(keyResult, destination, options);
     }
 
-    public Task<ReadOnlyMemory<char>> GetKeyAsync(int keyResult) {
-        int keyId = keyResult & keyIdMask;
+    public Task<ReadOnlyMemory<char>> GetKeyAsync(ulong keyResult) {
+        var keyId = keyResult & keyIdMask;
         var keyServiceRecord = GetKeyServiceRecord(keyId);
 
         if (keyServiceRecord.Type == Configuration.KeyType.Matrix) {
@@ -376,9 +373,7 @@ public sealed class KeyService : IKeyService, IDisposable {
         }
 
         var unmaskedKeyResult = UnmaskKeyResult(keyResult, keyServiceRecord);
-
-        int keyPosition = (unmaskedKeyResult >> keyPositionSize) & keyPositionMask,
-            keyLength = (unmaskedKeyResult >> keyPositionAndLength) & keyLengthMask;
+        BitPacker.BlockKeyUnpack(unmaskedKeyResult, out _, out var keyPosition, out var keyLength);
 
         return Task.FromResult(GetBlockKeyMaterial(KeyServiceOptions.KeyMemory[keyId], keyPosition, keyLength));
     }
@@ -388,13 +383,13 @@ public sealed class KeyService : IKeyService, IDisposable {
     /// </summary>
     /// <param name="keyId">Key identifier (0-255)</param>
     /// <returns>True if key exists</returns>
-    public bool ContainsKey(int keyId) => keyId >= 0 && keyId < KeyService.MaxKeyCount && Keys[keyId] != null;
+    public bool ContainsKey(ulong keyId) => keyId < KeyService.MaxKeyCount && Keys[keyId] != null;
     /// <summary>
     /// Delete the Key Id from the Key Manager (0-255)
     /// </summary>
     /// <param name="keyId">Key identifier (0-255)</param>
     /// <returns>True if key was deleted</returns>
-    public bool DeleteKey(int keyId) => KeyServiceOptions.DeleteKey(keyId);
+    public bool DeleteKey(ulong keyId) => KeyServiceOptions.DeleteKey(keyId);
 
     /// <summary>
     /// Delete all Keys from the Key Manager (all 256 slots)
@@ -407,14 +402,14 @@ public sealed class KeyService : IKeyService, IDisposable {
     /// </summary>
     /// <returns>Random key ID between 0 and 255</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public int GetRandomKeyId() => RandomNumberGenerator.GetInt32(KeyCount);
+    public ulong GetRandomKeyId() => (ulong)RandomNumberGenerator.GetInt32(KeyCount);
     /// <summary>
     /// Get the Key Service Record for a given key ID (0-255)
     /// </summary>
     /// <param name="keyId">Key identifier (0-255)</param>
     /// <returns>KeyServiceRecord containing key configuration</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static KeyServiceRecord GetKeyServiceRecord(int keyId) {
+    private static KeyServiceRecord GetKeyServiceRecord(ulong keyId) {
         if (keyId >= 0 && keyId < KeyService.MaxKeyCount) {
             var record = Keys[keyId];
             if (record != null) {
@@ -426,17 +421,14 @@ public sealed class KeyService : IKeyService, IDisposable {
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int ApplyKeyIdMask(int keyResult, int keyMaskId) {
-        //var effectiveMask = keyMaskId & ~keyIdMask;
-        var effectiveMask = keyMaskId;// & ~keyIdMask;
-        return keyResult ^ effectiveMask;
-    }
+    private static ulong ApplyKeyIdMask(ulong keyResult, ulong keyMaskId) => keyResult ^ keyMaskId;
 
-    private static int UnmaskKeyResult(int maskedKeyResult, KeyServiceRecord keyServiceRecord) {
-        var unmaskedKeyResult = ApplyKeyIdMask(maskedKeyResult, keyServiceRecord.KeyIdMask);
-        int decodedKeyId = unmaskedKeyResult & keyIdMask,
-            keyPosition = (unmaskedKeyResult >> keyPositionSize) & keyPositionMask,
-            keyLength = (unmaskedKeyResult >> keyPositionAndLength) & keyLengthMask;
+    private static ulong UnmaskKeyResult(ulong maskedKeyResult, KeyServiceRecord keyServiceRecord) {
+        var unmaskedKeyResult = ApplyKeyIdMask(maskedKeyResult, (ulong)keyServiceRecord.KeyIdMask);
+        BitPacker.BlockKeyUnpack(unmaskedKeyResult, out var decodedKeyId, out var keyPosition, out var keyLength);
+        //int decodedKeyId = unmaskedKeyResult & keyIdMask,
+        //    keyPosition = (unmaskedKeyResult >> keyPositionSize) & keyPositionMask,
+        //    keyLength = (unmaskedKeyResult >> keyPositionAndLength) & keyLengthMask;
 
         if (decodedKeyId != keyServiceRecord.Id) {
             throw new InvalidOperationException($"KeyIdMask for key id '{keyServiceRecord.Id}' modifies key id bits and is invalid.");
@@ -457,30 +449,30 @@ public sealed class KeyService : IKeyService, IDisposable {
         return unmaskedKeyResult;
     }
 
-    private static ReadOnlyMemory<char> GetBlockKeyMaterial(ReadOnlyMemory<char> source, int keyPosition, int keyLength) {
+    private static ReadOnlyMemory<char> GetBlockKeyMaterial(ReadOnlyMemory<char> source, ulong keyPosition, ulong keyLength) {
         var sourceSpan = source.Span;
-        int sourceLength = sourceSpan.Length;
-
-        if (keyPosition + keyLength <= sourceLength) {
-            return source.Slice(keyPosition, keyLength);
+        var sourceLength = sourceSpan.Length;
+        int iKeyPosition = (int)keyPosition, iKeyLength = (int)keyLength;
+        if (iKeyPosition + iKeyLength <= sourceLength) {
+            return source.Slice(iKeyPosition, iKeyLength);
         }
 
-        int firstSegmentLength = sourceLength - keyPosition;
-        int secondSegmentLength = keyLength - firstSegmentLength;
-        char[] wrapped = GC.AllocateUninitializedArray<char>(keyLength);
-        sourceSpan.Slice(keyPosition, firstSegmentLength).CopyTo(wrapped.AsSpan(0, firstSegmentLength));
+        int firstSegmentLength = sourceLength - iKeyPosition;
+        int secondSegmentLength = iKeyLength - firstSegmentLength;
+        char[] wrapped = GC.AllocateUninitializedArray<char>(iKeyLength);
+        sourceSpan.Slice(iKeyPosition, firstSegmentLength).CopyTo(wrapped.AsSpan(0, firstSegmentLength));
         sourceSpan.Slice(0, secondSegmentLength).CopyTo(wrapped.AsSpan(firstSegmentLength, secondSegmentLength));
         return wrapped;
     }
 
-    private static byte[] DeriveKeyBytes(ReadOnlyMemory<char> keyMaterial, int keyResult, int keySizeInBytes, KeyDerivationOptions options) {
-        var derivedKey = GC.AllocateUninitializedArray<byte>(keySizeInBytes);
+    private static byte[] DeriveKeyBytes(ReadOnlyMemory<char> keyMaterial, ulong keyResult, ulong keySizeInBytes, KeyDerivationOptions options) {
+        var derivedKey = GC.AllocateUninitializedArray<byte>((int)keySizeInBytes);
         DeriveKeyBytes(keyMaterial, keyResult, derivedKey, options);
         return derivedKey;
     }
 
-    private static void DeriveKeyBytes(ReadOnlyMemory<char> keyMaterial, int keyResult, Span<byte> destination, KeyDerivationOptions options) {
-        ValidateKeySize(destination.Length);
+    private static void DeriveKeyBytes(ReadOnlyMemory<char> keyMaterial, ulong keyResult, Span<byte> destination, KeyDerivationOptions options) {
+        ValidateKeySize((ulong)destination.Length);
 
         var keyChars = keyMaterial.Span;
         int byteCount = Encoding.UTF8.GetByteCount(keyChars);
@@ -493,10 +485,10 @@ public sealed class KeyService : IKeyService, IDisposable {
                     DeriveSha256(sourceKey, destination);
                     break;
                 case KeyDerivationAlgorithm.HkdfSha256:
-                    DeriveHkdfSha256(sourceKey, keyResult, destination, options);
+                    DeriveHkdfSha256(sourceKey, (int)keyResult, destination, options);
                     break;
                 case KeyDerivationAlgorithm.Pbkdf2Sha256:
-                    DerivePbkdf2Sha256(sourceKey, keyResult, destination, options);
+                    DerivePbkdf2Sha256(sourceKey, (int)keyResult, destination, options);
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(options), options.Algorithm, "Unsupported key derivation algorithm.");
@@ -564,7 +556,7 @@ public sealed class KeyService : IKeyService, IDisposable {
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void ValidateKeySize(int keySizeInBytes) {
+    private static void ValidateKeySize(ulong keySizeInBytes) {
         if (keySizeInBytes != KeySize128 && keySizeInBytes != KeySize192 && keySizeInBytes != KeySize256) {
             throw new ArgumentOutOfRangeException(nameof(keySizeInBytes), "Supported key sizes are 16, 24, and 32 bytes.");
         }
