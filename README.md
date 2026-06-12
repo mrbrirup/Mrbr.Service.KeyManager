@@ -267,14 +267,7 @@ This project is licensed under the MIT License.
 
 ---
 
-## Contributing
 
-Contributions are welcome! Please ensure:
-- All tests pass
-- Code follows existing patterns (aggressive inlining, nullable annotations, XML docs)
-- New features include corresponding tests
-
----
 
 ## Roadmap
 
