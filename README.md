@@ -2,6 +2,19 @@
 
 A high-performance .NET key management service supporting dual key generation strategies: **Block** (1D contiguous extraction) and **Matrix** (3D vector-based navigation).
 
+## Project Details
+
+- **Target Framework**: `net11.0`
+- **Package Version**: `1.0.2`
+- **Assembly/File Version**: `1.0.2.0`
+
+### Dependencies
+
+- `Mrbr.Extensions.Configuration` (`1.0.8`)
+- `Mrbr.SourceGenerators.Common` (`1.0.0`)
+- `System.Configuration.ConfigurationManager` (`11.0.0-preview.4.26230.115`)
+- Framework reference: `Microsoft.AspNetCore.App`
+
 ## Features
 
 - **256 Key Slots**: Supports key IDs from 0 to 255
