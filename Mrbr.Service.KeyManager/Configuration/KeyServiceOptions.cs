@@ -5,15 +5,63 @@ using static Mrbr.Service.KeyManager.Services.KeyService;
 
 namespace Mrbr.Service.KeyManager.Configuration;
 
+/// <summary>
+/// Wraps the configured key set and projects it into the static runtime cache used by <see cref="KeyService"/>.
+/// This class manages thread-safe initialization and provides high-performance key lookup through static arrays.
+/// </summary>
+/// <remarks>
+/// This sealed class implements the options pattern and maintains a static cache of key service records
+/// for fast key lookup operations. The cache is initialized once from configuration and remains in memory
+/// for the lifetime of the application.
+/// </remarks>
 public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
+    /// <summary>
+    /// Static array cache of key service records indexed by key ID for fast lookup.
+    /// </summary>
+    /// <remarks>
+    /// This shared state is cached once during initialization so key lookup stays fast after configuration is loaded.
+    /// </remarks>
     private static KeyServiceRecord?[] _keys = default!;
+
+    /// <summary>
+    /// Static array cache of key values as <see cref="ReadOnlyMemory{T}"/> for efficient memory access.
+    /// </summary>
     private static ReadOnlyMemory<char>[] _keyMemory = default!;
+
+    /// <summary>
+    /// The total number of keys currently loaded in the cache.
+    /// </summary>
     private static int _keyCount = 0;
+
+    /// <summary>
+    /// Flag indicating whether the static cache has been initialized.
+    /// </summary>
     private static bool _initialised = false;
+
+    /// <summary>
+    /// Lock object used to ensure thread-safe initialization and modification of the static cache.
+    /// </summary>
     private static readonly Lock lockObject = new();
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="KeyServiceOptions"/> class.
+    /// </summary>
+    /// <param name="options">The configuration options containing key service entries.</param>
+    /// <remarks>
+    /// <para>
+    /// This constructor processes the configuration and applies type-specific normalization where needed.
+    /// Block keys are currently passed through unchanged, preserving the place where type-specific
+    /// normalization can be applied without changing the configured values.
+    /// </para>
+    /// <para>
+    /// If this is the first instance, the static cache is initialized with all configured keys.
+    /// </para>
+    /// </remarks>
     public KeyServiceOptions(IOptions<KeyServiceConfig> options) {
         this.Value = options.Value;
 
+        // Block keys are currently passed through unchanged; this preserves the place where
+        // type-specific normalization can be applied without changing the configured values.
         foreach (var keyServiceEntry in Value) {
             if (keyServiceEntry.Type == KeyType.Block) {
                 //var blockSettings = keyServiceEntry.BlockSettings ?? throw new InvalidOperationException($"BlockSettings must be provided for key {keyServiceEntry.Key} of type Block.");
@@ -27,10 +75,44 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
         if (_initialised == false) { Initialise(); }
     }
 
+    /// <summary>
+    /// Gets the static array of key service records indexed by key ID.
+    /// </summary>
+    /// <value>
+    /// An array of nullable <see cref="KeyServiceRecord"/> objects where the index represents the key ID.
+    /// </value>
     public static KeyServiceRecord?[] Keys => _keys;
+
+    /// <summary>
+    /// Gets the static array of key values as <see cref="ReadOnlyMemory{T}"/> for efficient memory access.
+    /// </summary>
+    /// <value>
+    /// An array of <see cref="ReadOnlyMemory{T}"/> containing the key values indexed by key ID.
+    /// </value>
     public static ReadOnlyMemory<char>[] KeyMemory => _keyMemory;
+
+    /// <summary>
+    /// Gets the total number of keys currently loaded in the cache.
+    /// </summary>
+    /// <value>
+    /// The count of non-null keys in the cache.
+    /// </value>
     public static int KeyCount => _keyCount;
 
+    /// <summary>
+    /// Deletes a key from the static cache by its key ID.
+    /// </summary>
+    /// <param name="keyId">The ID of the key to delete (0-255).</param>
+    /// <returns>
+    /// <c>true</c> if the key was found and deleted; <c>false</c> if the key does not exist.
+    /// </returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// Thrown when <paramref name="keyId"/> is outside the valid range (0 to <see cref="KeyService.MaxKeyCount"/> - 1).
+    /// </exception>
+    /// <remarks>
+    /// This method is thread-safe and removes the key from both the record array and memory cache
+    /// while keeping the key count synchronized.
+    /// </remarks>
     public static bool DeleteKey(ulong keyId) {
         lock (lockObject) {
             if (keyId >= KeyService.MaxKeyCount) {
@@ -38,6 +120,7 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
             }
             if (_keys[keyId] == null) return false; // Key does not exist
 
+            // Keep the record array, memory cache, and count in sync.
             _keys[keyId] = null;
             _keyMemory[keyId] = default;
             _keyCount--;
@@ -45,9 +128,20 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
         return true;
     }
 
+    /// <summary>
+    /// Deletes all keys from the static cache.
+    /// </summary>
+    /// <returns>
+    /// <c>true</c> if keys were deleted; <c>false</c> if the cache was already empty.
+    /// </returns>
+    /// <remarks>
+    /// This method is thread-safe and clears both the key records and memory cache arrays,
+    /// ensuring no stale key data remains reachable. The key count is reset to zero.
+    /// </remarks>
     public static bool DeleteAllKeys() {
         lock (lockObject) {
             if (_keyCount > 0) {
+                // Reset both caches together so no stale key data remains reachable.
                 Array.Clear(_keys, 0, _keys.Length);
                 Array.Clear(_keyMemory, 0, _keyMemory.Length);
                 _keyCount = 0;
@@ -57,10 +151,36 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
         return false;
     }
 
+    /// <summary>
+    /// Initializes the static cache with keys from the configuration.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This method uses double-checked locking to ensure thread-safe initialization.
+    /// It allocates fixed-size backing arrays once, with entries indexed directly by key ID.
+    /// </para>
+    /// <para>
+    /// The initialization process:
+    /// <list type="number">
+    /// <item><description>Allocates arrays sized to <see cref="KeyService.MaxKeyCount"/>.</description></item>
+    /// <item><description>Validates each key configuration entry.</description></item>
+    /// <item><description>Parses and validates the key ID mask.</description></item>
+    /// <item><description>Creates type-specific <see cref="KeyServiceRecord"/> objects (Block or Matrix).</description></item>
+    /// <item><description>Populates both the record array and memory cache.</description></item>
+    /// </list>
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// Thrown when a key ID is outside the valid range (0 to <see cref="KeyService.MaxKeyCount"/> - 1).
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown when an unknown <see cref="KeyType"/> is encountered or when validation fails.
+    /// </exception>
     void Initialise() {
         if (_initialised) return;
         lock (lockObject) {
             if (_initialised) return;
+            // Allocate the fixed-size backing arrays once; entries are indexed directly by key id.
             _keys = new KeyServiceRecord?[KeyService.MaxKeyCount];
             _keyMemory = new ReadOnlyMemory<char>[KeyService.MaxKeyCount];
             _keyCount = 0;
@@ -76,7 +196,7 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
 
                 var parsedKeyIdMask = ParseKeyIdMask(keyServiceItem.KeyIdMask, keyIndex);
 
-                // Create record based on key type
+                // Build the runtime record according to the configured key type.
                 KeyServiceRecord keyServiceRecord;
                 if (keyServiceItem.Type == KeyType.Block) {
                     keyServiceRecord = new KeyServiceRecord(
@@ -90,7 +210,7 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
                     );
                 }
                 else if (keyServiceItem.Type == KeyType.Matrix) {
-                    // For Matrix keys, validate matrix settings
+                    // Matrix keys carry their own matrix-specific validation and settings.
                     keyServiceItem.MatrixSettings!.Validate();
 
                     keyServiceRecord = new KeyServiceRecord(
@@ -115,6 +235,25 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
         }
     }
 
+    /// <summary>
+    /// Parses and validates the configured key-id mask before the runtime cache is created.
+    /// </summary>
+    /// <param name="keyIdMaskText">The string representation of the key ID mask to parse.</param>
+    /// <param name="keyId">The ID of the key this mask belongs to, used for error reporting.</param>
+    /// <returns>
+    /// The parsed integer value of the key ID mask.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown when:
+    /// <list type="bullet">
+    /// <item><description>The <paramref name="keyIdMaskText"/> cannot be parsed as an integer.</description></item>
+    /// <item><description>The parsed value is outside the valid range (0 to <see cref="KeyService.MaxKeyIdMaskValue"/>).</description></item>
+    /// <item><description>The mask sets any of the reserved key-id bits (lowest bits defined by <see cref="KeyService.keyPositionSize"/>).</description></item>
+    /// </list>
+    /// </exception>
+    /// <remarks>
+    /// The key ID mask must not overlap with the bits reserved for the key ID itself to prevent conflicts.
+    /// </remarks>
     private static int ParseKeyIdMask(string keyIdMaskText, int keyId) {
         if (int.TryParse(keyIdMaskText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedKeyIdMask) == false) {
             throw new InvalidOperationException($"Invalid KeyIdMask value '{keyIdMaskText}' for key '{keyId}'.");
@@ -130,5 +269,12 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
 
         return parsedKeyIdMask;
     }
+
+    /// <summary>
+    /// Gets the key service configuration value.
+    /// </summary>
+    /// <value>
+    /// The <see cref="KeyServiceConfig"/> instance containing all configured key entries.
+    /// </value>
     public KeyServiceConfig Value { get; }
 }

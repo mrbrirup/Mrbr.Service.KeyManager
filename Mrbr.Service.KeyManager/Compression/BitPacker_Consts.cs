@@ -1,7 +1,27 @@
 ﻿namespace Mrbr.Service.KeyManager.Compression;
 
+/// <summary>
+/// Provides precomputed binary power and bit mask constants used by `BitPacker`.
+/// </summary>
+/// <remarks>
+/// <para>
+/// `Bin_n` represents `2^n`.
+/// </para>
+/// <para>
+/// `Bin_n_Max` represents the maximum unsigned value that can be stored in `n` bits,
+/// which is equivalent to `(2^n) - 1`.
+/// </para>
+/// <para>
+/// These constants are intended to make bit-packing code easier to read and to avoid
+/// repeating shift or mask expressions throughout the implementation.
+/// </para>
+/// <para>
+/// Values from `Bin_0` through `Bin_31` are stored as `uint`. Values from `Bin_32`
+/// through `Bin_63`, along with `Bin_64_Max`, are stored as `ulong`.
+/// </para>
+/// </remarks>
 public static partial class BitPacker {
-    // The example displays the following output:
+    // Precomputed powers of two and their corresponding maximum bit masks.
     public const uint Bin_0 = 1;    //     2^0 = 1 (0x1)
     public const uint Bin_1 = 2;    //     2^1 = 2 (0x2)    
     public const uint Bin_1_Max = Bin_1 - 1; //    2^1 - 1 = 1 (0x1)
@@ -65,6 +85,8 @@ public static partial class BitPacker {
     public const uint Bin_30_Max = Bin_30 - 1; //    2^30 - 1 = 1,073,741,823 (0x3FFFFFFF)
     public const uint Bin_31 = 2_147_483_648; //     2^31 = 2,147,483,648 (0x80000000)
     public const uint Bin_31_Max = Bin_31 - 1; //    2^31 - 1 = 2,147,483,647 (0x7FFFFFFF)
+
+    // Constants that exceed `uint` capacity and are therefore stored as `ulong`.
     public const ulong Bin_32 = 4_294_967_296; //     2^32 = 4,294,967,296 (0x100000000)
     public const ulong Bin_32_Max = Bin_32 - 1; //    2^32 - 1 = 4,294,967,295 (0xFFFFFFFF)
     public const ulong Bin_33 = 8_589_934_592; //     2^33 = 8,589,934,592 (0x200000000)
@@ -129,5 +151,7 @@ public static partial class BitPacker {
     public const ulong Bin_62_Max = Bin_62 - 1; //    2^62 - 1 = 4,611,686_018_427_387_903 (0x3FFFFFFFFFFFFFF)
     public const ulong Bin_63 = 9_223_372_036_854_775_808; //     2^63 = 9,223,372_036_854_775_808 (0x8000000000000000)
     public const ulong Bin_63_Max = Bin_63 - 1; //    2^63 - 1 = 9,223,372_036_854_775_807 (0x7FFFFFFFFFFFFFF)
+
+    // The maximum value representable by all 64 unsigned bits.
     public const ulong Bin_64_Max = Bin_63 + Bin_63_Max; //    2^64 - 1 = 18,446,744,073,709,551,615 (0xFFFFFFFFFFFFFFFF)
 }
