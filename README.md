@@ -55,32 +55,30 @@ Block keyResult Format (28 bits used):
 
 ### Matrix Keys (3D Vector-Based Navigation)
 
-Matrix mode builds a flat 3D byte matrix from source text and walks through it using 16 random vector steps:
+Matrix mode builds a flat one-byte-per-cell 3D matrix from source text and walks through it using compact 5-bit vectors. The key handle stores the start position and walk seed; the requested key length is supplied by the caller's destination span.
 
 ```
-Matrix Metadata (19 bytes):
-┌─────────┬─────────────────┬──────────────────────────┐
-│ KeyId:8 │ StartPosition:16│ Vectors:128 (16×8 bits)  │
-│ (0-255) │ (10 bits used)  │ (16 vector steps)        │
-└─────────┴─────────────────┴──────────────────────────┘
+Matrix key handle payload:
+[KeySourceId:8][Format:8][StartPosition:N][WalkSeed:48-N]
 ```
 
 **Key Properties**:
-- 3D matrix layout: `[x + (y * width) + (z * width * height)] * 8 bytes per cell`
-- Each vector is a 5-bit direction code (0=no-op, 1-26=move, 31=stop)
-- Random start position and vectors ensure unique key paths
-- `MatrixKeyResult` preserves full walk state for key recreation
+- 3D matrix layout: `x + (y * width) + (z * width * height)`
+- Powers-of-two dimensions allow offset packing with shifts and wrap-around with bit masks
+- Each vector is a 5-bit value; values `1-26` map to the valid 3D movement directions
+- Values `0` and `27-31` are reserved and remapped, not treated as stop markers
+- Each vector leg emits up to 8 bytes; the final leg is truncated to the requested key size
+- Matrix handles do not store key length; replay writes into the caller-provided destination length
 
 **Configuration** (`KeyMatrixSettings`):
 - `Width`, `Height`, `Depth`: Matrix dimensions (must be powers of 2, range 8-2048)
-- `VectorMask`: 64-bit obfuscation mask for vectors
-- `KeyMask`: 64-bit obfuscation mask for output keys
+- Source text must contain at least `Width * Height * Depth` UTF-8 bytes
+- Matrix dimensions must leave at least 16 walk-seed bits in the 64-bit key handle
 
-**3D Vector Directions** (OptimizedKeyWalker):
+**3D Vector Directions**:
 ```
-0: No-op (stay in place)
-1-26: 3D movement vectors (combinations of ±X, ±Y, ±Z)
-31: Stop marker (ends walk early)
+1-26: 3D movement vectors (all combinations of -1, 0, +1 across X/Y/Z except 0,0,0)
+0, 27-31: Reserved values remapped to valid directions
 ```
 
 ---
@@ -110,9 +108,7 @@ Matrix Metadata (19 bytes):
       "MatrixSettings": {
         "Width": 16,
         "Height": 16,
-        "Depth": 8,
-        "VectorMask": 0,
-        "KeyMask": 0
+        "Depth": 8
       }
     }
   ]
@@ -179,26 +175,14 @@ byte[] derivedKey = keyService.GetKey256(keyResult, options);
 
 ### Matrix Key Persistence
 
-For Matrix keys, the `keyResult` only contains the Key ID. To recreate the exact key, you must preserve the full `MatrixKeyResult`:
+For Matrix keys, the returned `keyHandle` contains the unmasked `KeySourceId` plus masked replay metadata for the matrix start position and walk seed. The requested key length is not stored in the handle; replay into the same destination length to reproduce the same key material.
 
 ```csharp
-using Mrbr.Service.KeyManager.Matrices;
+Span<byte> generated = stackalloc byte[32];
+keyService.GenerateKey(generated, out ulong keyHandle);
 
-var matrixGenerator = new MatrixKeyGenerator(matrixSettings);
-var result = matrixGenerator.GenerateKey(sourceText, keyId: 42, maxTargetBytes: 32);
-
-// Encode for storage
-byte[] encoded = result.EncodeToBytes(); // 19 bytes: [keyId:1][startPos:2][vectors:16]
-
-// Decode for recreation
-var decoded = MatrixKeyResult.DecodeFromBytes(encoded);
-var recreated = matrixGenerator.RegenerateKey(
-    sourceText, 
-    decoded.KeyId, 
-    decoded.StartPosition, 
-    decoded.Vectors, 
-    maxTargetBytes: 32
-);
+Span<byte> replayed = stackalloc byte[32];
+keyService.GetKey(keyHandle, replayed);
 ```
 
 ---
@@ -230,9 +214,9 @@ public record KeyDerivationOptions {
 
 ### Matrix Keys
 - **Best for**: Maximum entropy and unpredictability
-- **Performance**: ~5-10μs per key generation (includes 16-step 3D walk)
-- **Space**: 19 bytes of metadata per key (not stored in `keyResult`)
-- **Note**: Metadata must be persisted separately for key recreation
+- **Performance**: Span-based replay with cached matrix source and fixed 8-byte legs
+- **Space**: Replay metadata is stored in the 64-bit `KeyHandle`
+- **Note**: Callers must supply the desired destination length when replaying Matrix keys
 
 ---
 
@@ -246,7 +230,7 @@ public record KeyDerivationOptions {
 ### Matrix Keys
 - `Width`, `Height`, `Depth` must be powers of 2
 - Dimensions range: 8-2048
-- Total matrix size: `Width × Height × Depth × 8 bytes` ≥ 128 bytes
+- Total matrix size: `Width * Height * Depth` bytes must be at least 128 bytes
 - Source text must provide enough UTF-8 bytes to fill the matrix
 
 ### Common Rules
@@ -267,7 +251,7 @@ dotnet test Mrbr.Service.KeyManager.Tests
 **Test Coverage**:
 - MatrixBuilder flat matrix creation and dimension validation
 - MatrixKeyGenerator key generation and regeneration consistency
-- MatrixKeyResult encoding/decoding round-trips
+- Matrix key handle replay and 5-bit vector behavior
 - KeyBlockSettings constraint validation
 - KeyServiceEntry type-specific settings enforcement
 - Key ID range validation (0-255)

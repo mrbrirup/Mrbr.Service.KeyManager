@@ -13,9 +13,13 @@ public static class KeyHandleCodec {
     public const int FormatShift = 8;
     public const int BlockStartShift = 16;
     public const int BlockLengthShift = 48;
+    public const int MatrixStartShift = 16;
 
     public const byte BlockFormat = 1;
+    public const byte MatrixFormat = 2;
 
+    private const int MatrixPayloadBits = 48;
+    private const int MatrixMinimumSeedBits = 16;
     private const ulong FormatMask = 0xFFUL;
     private const ulong BlockStartMask = 0xFFFFFFFFUL;
     private const ulong BlockLengthMask = 0xFFFFUL;
@@ -45,6 +49,46 @@ public static class KeyHandleCodec {
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ulong PackMatrix(byte keySourceId, uint startPosition, ulong seed, int startBitCount, ulong keyHandleMask) {
+        ValidateMatrixStartBitCount(startBitCount);
+
+        int seedBitCount = MatrixPayloadBits - startBitCount;
+        ulong raw = keySourceId |
+            ((ulong)MatrixFormat << FormatShift) |
+            (((ulong)startPosition & CreateMask(startBitCount)) << MatrixStartShift) |
+            ((seed & CreateMask(seedBitCount)) << (MatrixStartShift + startBitCount));
+
+        return raw ^ NormalizeMask(keyHandleMask);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void UnpackMatrix(
+        ulong keyHandle,
+        ulong keyHandleMask,
+        int startBitCount,
+        out byte keySourceId,
+        out uint startPosition,
+        out ulong seed) {
+        ValidateMatrixStartBitCount(startBitCount);
+
+        ulong raw = keyHandle ^ NormalizeMask(keyHandleMask);
+        int seedBitCount = MatrixPayloadBits - startBitCount;
+        keySourceId = (byte)(raw & KeySourceIdMask);
+        startPosition = (uint)((raw >> MatrixStartShift) & CreateMask(startBitCount));
+        seed = (raw >> (MatrixStartShift + startBitCount)) & CreateMask(seedBitCount);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static byte GetFormat(ulong keyHandle, ulong keyHandleMask) =>
         (byte)(((keyHandle ^ NormalizeMask(keyHandleMask)) >> FormatShift) & FormatMask);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong CreateMask(int bitCount) => (1UL << bitCount) - 1UL;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ValidateMatrixStartBitCount(int startBitCount) {
+        if (startBitCount <= 0 || startBitCount > MatrixPayloadBits - MatrixMinimumSeedBits) {
+            throw new ArgumentOutOfRangeException(nameof(startBitCount), $"Matrix start bit count must leave at least {MatrixMinimumSeedBits} seed bits in the key handle.");
+        }
+    }
 }

@@ -12,7 +12,7 @@ public enum KeyType {
 
     /// <summary>
     /// 3D vector-based navigation through matrix space.
-    /// Uses position and vectors encoding: [keyId:8bits][startPosition:10bits][vectors:128bits]
+    /// Uses handle encoding: [KeySourceId:8bits][Format:8bits][StartPosition:N bits][WalkSeed:remaining bits].
     /// </summary>
     Matrix = 1
 }

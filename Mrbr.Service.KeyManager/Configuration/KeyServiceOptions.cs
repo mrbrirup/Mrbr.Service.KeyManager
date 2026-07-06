@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.Options;
+using Mrbr.Service.KeyManager.Matrices;
 using Mrbr.Service.KeyManager.Services;
 using System.Globalization;
 using System.Text;
@@ -243,12 +244,14 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
                         parsedKeyHandleMask,
                         KeyType.Block,
                         keyServiceItem.BlockSettings,
+                        null,
                         null
                     );
                 }
                 else if (keyServiceItem.Type == KeyType.Matrix) {
                     // Matrix keys carry their own matrix-specific validation and settings.
-                    keyServiceItem.MatrixSettings!.Validate();
+                    keyServiceItem.MatrixSettings!.Validate(sourceBytes.Length);
+                    var matrixWalker = new MatrixKeyWalker(keyServiceItem.MatrixSettings, sourceBytes);
 
                     keyServiceRecord = new KeyServiceRecord(
                         keyIndex,
@@ -257,7 +260,8 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
                         parsedKeyHandleMask,
                         KeyType.Matrix,
                         null,
-                        keyServiceItem.MatrixSettings
+                        keyServiceItem.MatrixSettings,
+                        matrixWalker
                     );
                 }
                 else {

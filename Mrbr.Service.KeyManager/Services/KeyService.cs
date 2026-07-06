@@ -1,5 +1,6 @@
 using Mrbr.Service.KeyManager.Configuration;
 using Mrbr.Service.KeyManager.KeyHandles;
+using Mrbr.Service.KeyManager.Matrices;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 
@@ -18,7 +19,8 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
         ulong KeyHandleMask,
         KeyType Type,
         KeyBlockSettings? BlockSettings,
-        KeyMatrixSettings? MatrixSettings
+        KeyMatrixSettings? MatrixSettings,
+        MatrixKeyWalker? MatrixWalker
     );
 
     public const int MaxKeyCount = 256;
@@ -35,9 +37,6 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
     public const int KeySize128 = 16;
     public const int KeySize192 = 24;
     public const int KeySize256 = 32;
-
-    public const int matrixStartPositionSize = 8;
-    public const int matrixStartPositionMask = 0x7FFFFF;
 
     private static KeyServiceRecord?[] Keys => KeyServiceOptions.Keys;
     private static int KeyCount => KeyServiceOptions.KeyCount;
@@ -58,9 +57,8 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
     public ReadOnlyMemory<char> GenerateKey(out ulong keyHandle) {
         var record = GetRandomKeyServiceRecord();
         if (record.Type == KeyType.Matrix) {
-            var matrixGenerator = new Matrices.MatrixKeyGenerator(record.MatrixSettings!);
-            var matrixResult = matrixGenerator.GenerateKey(record.Value, (byte)record.KeySourceId, KeySize128);
-            keyHandle = PackMatrixHandle(record, matrixResult.StartPosition);
+            Span<byte> ignoredKey = stackalloc byte[KeySize128];
+            GenerateMatrixKey(record, ignoredKey, out keyHandle);
             return ReadOnlyMemory<char>.Empty;
         }
 
@@ -271,23 +269,24 @@ public sealed class KeyService(KeyServiceOptions options) : IKeyService, IDispos
     }
 
     private static void GenerateMatrixKey(KeyServiceRecord record, Span<byte> destination, out ulong keyHandle) {
-        var matrixGenerator = new Matrices.MatrixKeyGenerator(record.MatrixSettings!);
-        var matrixResult = matrixGenerator.GenerateKey(record.Value, (byte)record.KeySourceId, destination.Length);
-        matrixResult.KeyBytes.CopyTo(destination);
-        keyHandle = PackMatrixHandle(record, matrixResult.StartPosition);
+        var walker = record.MatrixWalker ?? throw new InvalidOperationException($"Key source '{record.KeySourceId}' is not configured as a Matrix source.");
+        walker.Generate(destination, out uint startPosition, out ulong seed);
+        keyHandle = KeyHandleCodec.PackMatrix((byte)record.KeySourceId, startPosition, seed, walker.StartBitCount, record.KeyHandleMask);
     }
 
     private static void GetMatrixKey(KeyServiceRecord record, ulong keyHandle, Span<byte> destination) {
-        ulong unmasked = keyHandle ^ KeyHandleCodec.NormalizeMask(record.KeyHandleMask);
-        ulong startPosition = (unmasked >> matrixStartPositionSize) & (uint)matrixStartPositionMask;
-        var matrixGenerator = new Matrices.MatrixKeyGenerator(record.MatrixSettings!);
-        var matrixResult = matrixGenerator.RegenerateKey(record.Value, (byte)record.KeySourceId, startPosition, (ulong)destination.Length);
-        matrixResult.KeyBytes.CopyTo(destination);
-    }
+        var walker = record.MatrixWalker ?? throw new InvalidOperationException($"Key source '{record.KeySourceId}' is not configured as a Matrix source.");
+        if (KeyHandleCodec.GetFormat(keyHandle, record.KeyHandleMask) != KeyHandleCodec.MatrixFormat) {
+            throw new ArgumentException("Key handle does not contain a Matrix payload.", nameof(keyHandle));
+        }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ulong PackMatrixHandle(KeyServiceRecord record, ulong startPosition) =>
-        ((ulong)(byte)record.KeySourceId | (startPosition << matrixStartPositionSize)) ^ KeyHandleCodec.NormalizeMask(record.KeyHandleMask);
+        KeyHandleCodec.UnpackMatrix(keyHandle, record.KeyHandleMask, walker.StartBitCount, out var decodedKeySourceId, out var startPosition, out var seed);
+        if (decodedKeySourceId != record.KeySourceId) {
+            throw new InvalidOperationException($"KeyHandleMask for key source '{record.KeySourceId}' modifies KeySourceId bits and is invalid.");
+        }
+
+        walker.Replay(startPosition, seed, destination);
+    }
 
     private static void CopyWrapped(ReadOnlySpan<byte> source, int start, Span<byte> destination) {
         int firstSegmentLength = Math.Min(source.Length - start, destination.Length);
