@@ -258,6 +258,18 @@ dotnet test Mrbr.Service.KeyManager.Tests
 
 ---
 
+## Benchmarking
+
+Run the benchmark suite:
+
+```bash
+dotnet run -c Release --project Mrbr.Service.KeyManager.Benchmarks
+```
+
+The benchmark project includes matching Block and Matrix suites for key material generation/replay, allocation-based convenience APIs, HMAC-SHA256, and AES-GCM encrypt/decrypt comparisons against static-key variants.
+
+---
+
 ## License
 
 This project is licensed under the MIT License.
@@ -268,7 +280,6 @@ This project is licensed under the MIT License.
 
 ## Roadmap
 
-- [ ] Add benchmarking suite for Block vs Matrix performance comparison
 - [ ] Support for custom vector direction mappings
 - [ ] Matrix walk result caching for frequently-used keys
 - [ ] Integration with hardware security modules (HSM)

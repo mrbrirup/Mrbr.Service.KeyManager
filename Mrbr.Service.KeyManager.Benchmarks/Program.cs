@@ -83,6 +83,63 @@ public class BlockKeyManagerBenchmarks {
 [RankColumn]
 [Orderer(SummaryOrderPolicy.FastestToSlowest)]
 [GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]
+public class MatrixKeyManagerBenchmarks {
+    private KeyService _service = default!;
+    private byte[] _staticKey = [];
+    private byte[] _destination = [];
+    private byte[] _replayDestination = [];
+    private ulong _keyHandle;
+
+    [Params(16, 24, 32, 64, 128, 256)]
+    public int KeySize { get; set; }
+
+    [Params(4 * 1024, 1024 * 1024)]
+    public int SourceSize { get; set; }
+
+    [GlobalSetup]
+    public void Setup() {
+        _service = BenchmarkKeyServiceFactory.CreateMatrixService(SourceSize);
+        _staticKey = BenchmarkKeyServiceFactory.BuildBytes(KeySize);
+        _destination = new byte[KeySize];
+        _replayDestination = new byte[KeySize];
+        _service.GenerateKey(_destination, out _keyHandle);
+    }
+
+    [Benchmark(Baseline = true)]
+    [BenchmarkCategory("KeyMaterial")]
+    public void StaticKeyCopy() {
+        _staticKey.AsSpan().CopyTo(_destination);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("KeyMaterial")]
+    public void GenerateKeyManagerSpan() {
+        _service.GenerateKey(_destination, out _);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("KeyMaterial")]
+    public void ReplayKeyManagerSpan() {
+        _service.GetKey(_keyHandle, _replayDestination);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("Allocation")]
+    public byte[] GenerateKeyManagerArray() {
+        return _service.GenerateKey(KeySize, out _);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("Allocation")]
+    public byte[] ReplayKeyManagerArray() {
+        return _service.GetKeyBytes(_keyHandle, (ulong)KeySize);
+    }
+}
+
+[MemoryDiagnoser]
+[RankColumn]
+[Orderer(SummaryOrderPolicy.FastestToSlowest)]
+[GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]
 public class BlockCryptoComparisonBenchmarks {
     private KeyService _service = default!;
     private byte[] _staticKey = [];
@@ -207,6 +264,134 @@ public class BlockCryptoComparisonBenchmarks {
     }
 }
 
+[MemoryDiagnoser]
+[RankColumn]
+[Orderer(SummaryOrderPolicy.FastestToSlowest)]
+[GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]
+public class MatrixCryptoComparisonBenchmarks {
+    private KeyService _service = default!;
+    private byte[] _staticKey = [];
+    private byte[] _staticWorkingKey = [];
+    private byte[] _managerKey = [];
+    private byte[] _plainText = [];
+    private byte[] _cipherText = [];
+    private byte[] _decryptedText = [];
+    private byte[] _tag = [];
+    private byte[] _nonce = [];
+    private byte[] _hash = [];
+    private AesGcm _cachedStaticAesGcm = default!;
+    private ulong _keyHandle;
+
+    [Params(16, 24, 32)]
+    public int KeySize { get; set; }
+
+    [Params(128, 4 * 1024)]
+    public int PayloadSize { get; set; }
+
+    [GlobalSetup]
+    public void Setup() {
+        _service = BenchmarkKeyServiceFactory.CreateMatrixService(1024 * 1024);
+        _managerKey = new byte[KeySize];
+        _plainText = BenchmarkKeyServiceFactory.BuildBytes(PayloadSize);
+        _cipherText = new byte[PayloadSize];
+        _decryptedText = new byte[PayloadSize];
+        _tag = new byte[16];
+        _nonce = new byte[12];
+        _hash = new byte[32];
+
+        _service.GenerateKey(_managerKey, out _keyHandle);
+        _staticKey = _managerKey.ToArray();
+        _staticWorkingKey = new byte[KeySize];
+        RandomNumberGenerator.Fill(_nonce);
+
+        _cachedStaticAesGcm = new AesGcm(_staticKey, _tag.Length);
+        _cachedStaticAesGcm.Encrypt(_nonce, _plainText, _cipherText, _tag);
+    }
+
+    [GlobalCleanup]
+    public void Cleanup() {
+        _cachedStaticAesGcm.Dispose();
+    }
+
+    [Benchmark(Baseline = true)]
+    [BenchmarkCategory("HMAC")]
+    public void StaticKeyHmacSha256() {
+        HMACSHA256.HashData(_staticKey, _plainText, _hash);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("HMAC")]
+    public void StaticKeyCopyHmacSha256() {
+        _staticKey.AsSpan().CopyTo(_staticWorkingKey);
+        HMACSHA256.HashData(_staticWorkingKey, _plainText, _hash);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("HMAC")]
+    public void KeyManagerReplayHmacSha256() {
+        _service.GetKey(_keyHandle, _managerKey);
+        HMACSHA256.HashData(_managerKey, _plainText, _hash);
+    }
+
+    [Benchmark(Baseline = true)]
+    [BenchmarkCategory("AES-GCM Encrypt")]
+    public void StaticKeyAesGcmEncrypt() {
+        using var aes = new AesGcm(_staticKey, _tag.Length);
+        aes.Encrypt(_nonce, _plainText, _cipherText, _tag);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("AES-GCM Encrypt")]
+    public void StaticKeyCopyAesGcmEncrypt() {
+        _staticKey.AsSpan().CopyTo(_staticWorkingKey);
+        using var aes = new AesGcm(_staticWorkingKey, _tag.Length);
+        aes.Encrypt(_nonce, _plainText, _cipherText, _tag);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("AES-GCM Encrypt")]
+    public void CachedStaticAesGcmEncrypt() {
+        _cachedStaticAesGcm.Encrypt(_nonce, _plainText, _cipherText, _tag);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("AES-GCM Encrypt")]
+    public void KeyManagerReplayAesGcmEncrypt() {
+        _service.GetKey(_keyHandle, _managerKey);
+        using var aes = new AesGcm(_managerKey, _tag.Length);
+        aes.Encrypt(_nonce, _plainText, _cipherText, _tag);
+    }
+
+    [Benchmark(Baseline = true)]
+    [BenchmarkCategory("AES-GCM Decrypt")]
+    public void StaticKeyAesGcmDecrypt() {
+        using var aes = new AesGcm(_staticKey, _tag.Length);
+        aes.Decrypt(_nonce, _cipherText, _tag, _decryptedText);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("AES-GCM Decrypt")]
+    public void StaticKeyCopyAesGcmDecrypt() {
+        _staticKey.AsSpan().CopyTo(_staticWorkingKey);
+        using var aes = new AesGcm(_staticWorkingKey, _tag.Length);
+        aes.Decrypt(_nonce, _cipherText, _tag, _decryptedText);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("AES-GCM Decrypt")]
+    public void CachedStaticAesGcmDecrypt() {
+        _cachedStaticAesGcm.Decrypt(_nonce, _cipherText, _tag, _decryptedText);
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("AES-GCM Decrypt")]
+    public void KeyManagerReplayAesGcmDecrypt() {
+        _service.GetKey(_keyHandle, _managerKey);
+        using var aes = new AesGcm(_managerKey, _tag.Length);
+        aes.Decrypt(_nonce, _cipherText, _tag, _decryptedText);
+    }
+}
+
 internal static class BenchmarkKeyServiceFactory {
     public static KeyService CreateBlockService(int sourceSize) {
         ResetKeyServiceOptionsState();
@@ -217,6 +402,23 @@ internal static class BenchmarkKeyServiceFactory {
                 KeyHandleMask = "0",
                 Value = source,
                 Type = KeyType.Block
+            }
+        };
+
+        return new KeyService(new KeyServiceOptions(Options.Create(config)));
+    }
+
+    public static KeyService CreateMatrixService(int sourceSize) {
+        ResetKeyServiceOptionsState();
+        var matrixSettings = GetMatrixSettings(sourceSize);
+        string source = BuildAsciiSourceText(sourceSize);
+        var config = new KeyServiceConfig {
+            new() {
+                KeySourceId = 0,
+                KeyHandleMask = "0",
+                Value = source,
+                Type = KeyType.Matrix,
+                MatrixSettings = matrixSettings
             }
         };
 
@@ -238,6 +440,14 @@ internal static class BenchmarkKeyServiceFactory {
                 span[i] = (char)('!' + (i % 90));
             }
         });
+    }
+
+    private static KeyMatrixSettings GetMatrixSettings(int sourceSize) {
+        return sourceSize switch {
+            4 * 1024 => new KeyMatrixSettings { Width = 16, Height = 16, Depth = 16 },
+            1024 * 1024 => new KeyMatrixSettings { Width = 128, Height = 128, Depth = 64 },
+            _ => throw new ArgumentOutOfRangeException(nameof(sourceSize), "Matrix benchmark source size must map to configured power-of-two dimensions.")
+        };
     }
 
     private static void ResetKeyServiceOptionsState() {
