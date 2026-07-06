@@ -6,10 +6,20 @@
 /// </summary>
 public interface IKeyService {
     /// <summary>
+    /// Generates key material into a caller-provided destination and returns a replayable key handle.
+    /// </summary>
+    void GenerateKey(Span<byte> destination, out ulong keyHandle);
+
+    /// <summary>
+    /// Generates key material and returns an allocated byte array for convenience callers.
+    /// </summary>
+    byte[] GenerateKey(int length, out ulong keyHandle);
+
+    /// <summary>
     /// Generate a New Key for the Key Manager from one of 256 available keys (0-255).
     /// For Block keys: Returns key material slice. For Matrix keys: Returns empty (use GenerateKeyBytes for actual output).
     /// </summary>
-    /// <param name="keyId">Output key identifier</param>
+    /// <param name="keyId">Output key handle</param>
     /// <returns>Key material (Block keys) or empty (Matrix keys)</returns>
     ReadOnlyMemory<char> GenerateKey(out ulong keyId);
     /// <summary>
@@ -52,6 +62,11 @@ public interface IKeyService {
     /// <param name="keyId">Key identifier (0-255)</param>
     /// <returns>Key material</returns>
     ReadOnlyMemory<char> GetKey(ulong keyId);
+
+    /// <summary>
+    /// Replays a key handle into a caller-provided destination.
+    /// </summary>
+    void GetKey(ulong keyHandle, Span<byte> destination);
     /// <summary>
     /// Get a fixed-length 16-byte key from the Key Manager using a specific key ID (0-255).
     /// </summary>
@@ -74,6 +89,11 @@ public interface IKeyService {
     /// keySizeInBytes must be 16, 24, or 32.
     /// </summary>
     byte[] GetKeyBytes(ulong keyId, ulong keySizeInBytes, KeyDerivationOptions options = default);
+
+    /// <summary>
+    /// Replays a Block key handle into an allocated byte array using the length encoded in the handle.
+    /// </summary>
+    byte[] GetKeyBytes(ulong keyHandle);
     /// <summary>
     /// Get a fixed-length 16-byte key from the Key Manager into a caller-provided destination span using a specific key ID (0-255).
     /// </summary>

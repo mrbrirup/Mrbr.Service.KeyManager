@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Options;
 using Mrbr.Service.KeyManager.Services;
 using System.Globalization;
+using System.Text;
 using static Mrbr.Service.KeyManager.Services.KeyService;
 
 namespace Mrbr.Service.KeyManager.Configuration;
@@ -27,6 +28,16 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
     /// Static array cache of key values as <see cref="ReadOnlyMemory{T}"/> for efficient memory access.
     /// </summary>
     private static ReadOnlyMemory<char>[] _keyMemory = default!;
+
+    /// <summary>
+    /// Static array cache of UTF-8 source bytes indexed by key source ID.
+    /// </summary>
+    private static ReadOnlyMemory<byte>[] _keyBytes = default!;
+
+    /// <summary>
+    /// Dense list of configured key source IDs for random selection.
+    /// </summary>
+    private static int[] _keySourceIds = default!;
 
     /// <summary>
     /// The total number of keys currently loaded in the cache.
@@ -64,10 +75,10 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
         // type-specific normalization can be applied without changing the configured values.
         foreach (var keyServiceEntry in Value) {
             if (keyServiceEntry.Type == KeyType.Block) {
-                //var blockSettings = keyServiceEntry.BlockSettings ?? throw new InvalidOperationException($"BlockSettings must be provided for key {keyServiceEntry.Key} of type Block.");
+                //var blockSettings = keyServiceEntry.BlockSettings ?? throw new InvalidOperationException($"BlockSettings must be provided for key {keyServiceEntry.KeySourceId} of type Block.");
                 //keyServiceEntry.Value = keyServiceEntry.Value.ParseConfig();
                 keyServiceEntry.Value = keyServiceEntry.Value;
-                keyServiceEntry.KeyIdMask = keyServiceEntry.KeyIdMask;
+                keyServiceEntry.KeyHandleMask = keyServiceEntry.KeyHandleMask;
             }
         }
 
@@ -90,6 +101,16 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
     /// An array of <see cref="ReadOnlyMemory{T}"/> containing the key values indexed by key ID.
     /// </value>
     public static ReadOnlyMemory<char>[] KeyMemory => _keyMemory;
+
+    /// <summary>
+    /// Gets the static array of UTF-8 key source bytes indexed by key source ID.
+    /// </summary>
+    public static ReadOnlyMemory<byte>[] KeyBytes => _keyBytes;
+
+    /// <summary>
+    /// Gets the dense configured key source ID list used for random source selection.
+    /// </summary>
+    public static int[] KeySourceIds => _keySourceIds;
 
     /// <summary>
     /// Gets the total number of keys currently loaded in the cache.
@@ -118,11 +139,22 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
             if (keyId >= KeyService.MaxKeyCount) {
                 throw new ArgumentOutOfRangeException(nameof(keyId), $"Key Id must be between 0 and {KeyService.MaxKeyCount - 1} (0-255)");
             }
-            if (_keys[keyId] == null) return false; // Key does not exist
+            int keySourceId = (int)keyId;
+            if (_keys[keySourceId] == null) return false; // Key does not exist
 
             // Keep the record array, memory cache, and count in sync.
-            _keys[keyId] = null;
-            _keyMemory[keyId] = default;
+            _keys[keySourceId] = null;
+            _keyMemory[keySourceId] = default;
+            _keyBytes[keySourceId] = default;
+
+            for (int i = 0; i < _keyCount; i++) {
+                if (_keySourceIds[i] == keySourceId) {
+                    _keySourceIds[i] = _keySourceIds[_keyCount - 1];
+                    _keySourceIds[_keyCount - 1] = 0;
+                    break;
+                }
+            }
+
             _keyCount--;
         }
         return true;
@@ -144,6 +176,8 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
                 // Reset both caches together so no stale key data remains reachable.
                 Array.Clear(_keys, 0, _keys.Length);
                 Array.Clear(_keyMemory, 0, _keyMemory.Length);
+                Array.Clear(_keyBytes, 0, _keyBytes.Length);
+                Array.Clear(_keySourceIds, 0, _keySourceIds.Length);
                 _keyCount = 0;
                 return true;
             }
@@ -183,18 +217,21 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
             // Allocate the fixed-size backing arrays once; entries are indexed directly by key id.
             _keys = new KeyServiceRecord?[KeyService.MaxKeyCount];
             _keyMemory = new ReadOnlyMemory<char>[KeyService.MaxKeyCount];
+            _keyBytes = new ReadOnlyMemory<byte>[KeyService.MaxKeyCount];
+            _keySourceIds = new int[KeyService.MaxKeyCount];
             _keyCount = 0;
 
             foreach (var keyServiceItem in this.Value) {
-                var keyIndex = keyServiceItem.Key;
+                var keyIndex = keyServiceItem.KeySourceId;
                 if (keyIndex < 0 || keyIndex >= KeyService.MaxKeyCount) {
-                    throw new ArgumentOutOfRangeException(nameof(keyServiceItem.Key), $"Key Id must be between 0 and {KeyService.MaxKeyCount - 1} (0-255)");
+                    throw new ArgumentOutOfRangeException(nameof(keyServiceItem.KeySourceId), $"KeySourceId must be between 0 and {KeyService.MaxKeyCount - 1} (0-255)");
                 }
 
                 // Validate the entry (type-specific settings)
                 keyServiceItem.Validate();
 
-                var parsedKeyIdMask = ParseKeyIdMask(keyServiceItem.KeyIdMask, keyIndex);
+                var parsedKeyHandleMask = ParseKeyHandleMask(keyServiceItem.KeyHandleMask, keyIndex);
+                var sourceBytes = Encoding.UTF8.GetBytes(keyServiceItem.Value!);
 
                 // Build the runtime record according to the configured key type.
                 KeyServiceRecord keyServiceRecord;
@@ -202,8 +239,8 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
                     keyServiceRecord = new KeyServiceRecord(
                         keyIndex,
                         keyServiceItem.Value!,
-                        keyServiceItem.Value.Length - KeyService.MaxMaskLength,
-                        parsedKeyIdMask,
+                        sourceBytes,
+                        parsedKeyHandleMask,
                         KeyType.Block,
                         keyServiceItem.BlockSettings,
                         null
@@ -216,8 +253,8 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
                     keyServiceRecord = new KeyServiceRecord(
                         keyIndex,
                         keyServiceItem.Value!,
-                        0, // MaxCharPosition not used for Matrix
-                        parsedKeyIdMask,
+                        sourceBytes,
+                        parsedKeyHandleMask,
                         KeyType.Matrix,
                         null,
                         keyServiceItem.MatrixSettings
@@ -229,6 +266,8 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
 
                 _keys[keyIndex] = keyServiceRecord;
                 _keyMemory[keyIndex] = keyServiceRecord.Value.AsMemory();
+                _keyBytes[keyIndex] = keyServiceRecord.SourceBytes;
+                _keySourceIds[_keyCount] = keyIndex;
                 _keyCount++;
             }
             _initialised = true;
@@ -254,20 +293,16 @@ public sealed class KeyServiceOptions : IOptions<KeyServiceConfig> {
     /// <remarks>
     /// The key ID mask must not overlap with the bits reserved for the key ID itself to prevent conflicts.
     /// </remarks>
-    private static int ParseKeyIdMask(string keyIdMaskText, int keyId) {
-        if (int.TryParse(keyIdMaskText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedKeyIdMask) == false) {
-            throw new InvalidOperationException($"Invalid KeyIdMask value '{keyIdMaskText}' for key '{keyId}'.");
+    private static ulong ParseKeyHandleMask(string keyHandleMaskText, int keySourceId) {
+        if (ulong.TryParse(keyHandleMaskText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedKeyHandleMask) == false) {
+            throw new InvalidOperationException($"Invalid KeyHandleMask value '{keyHandleMaskText}' for key source '{keySourceId}'.");
         }
 
-        if (parsedKeyIdMask < 0 || parsedKeyIdMask > KeyService.MaxKeyIdMaskValue) {
-            throw new InvalidOperationException($"KeyIdMask value '{keyIdMaskText}' for key '{keyId}' must be between 0 and {KeyService.MaxKeyIdMaskValue}.");
+        if ((parsedKeyHandleMask & KeyService.keySourceIdMask) != 0) {
+            throw new InvalidOperationException($"KeyHandleMask value '{keyHandleMaskText}' for key source '{keySourceId}' must not set the lowest 8 KeySourceId bits.");
         }
 
-        if ((parsedKeyIdMask & KeyService.keyIdMask) != 0) {
-            throw new InvalidOperationException($"KeyIdMask value '{keyIdMaskText}' for key '{keyId}' must not set key-id bits (lowest {KeyService.keyPositionSize} bits). ");
-        }
-
-        return parsedKeyIdMask;
+        return parsedKeyHandleMask;
     }
 
     /// <summary>

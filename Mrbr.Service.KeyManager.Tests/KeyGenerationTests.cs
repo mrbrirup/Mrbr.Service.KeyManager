@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using Mrbr.Service.KeyManager.Configuration;
+using Mrbr.Service.KeyManager.KeyHandles;
 using Mrbr.Service.KeyManager.Matrices;
 using Mrbr.Service.KeyManager.Services;
 using System.Reflection;
@@ -88,7 +89,7 @@ public class KeyGenerationTests {
         // Assert
         Assert.Equal(42, result.KeyId);
         Assert.Equal(32, result.KeyBytes.Length);
-        Assert.Equal(1, result.Vectors.Length); // Directional walk now stores only first vector
+        Assert.Single(result.Vectors); // Directional walk now stores only first vector
         Assert.InRange(result.StartPosition, 0UL, 16UL * 16UL * 8UL - 1UL);
     }
 
@@ -197,12 +198,12 @@ public class KeyGenerationTests {
 
     [Fact]
     public void KeyServiceEntry_Validates_TypeSpecificSettings() {
-        // Arrange - Block entry without Block settings
-        var invalidBlockEntry = new KeyServiceEntry {
+        // Arrange - Block entry without legacy Block settings
+        var validBlockEntryWithoutSettings = new KeyServiceEntry {
             Key = 10,
             Value = new string('A', 200),
             Type = KeyType.Block,
-            BlockSettings = null,  // Missing required settings
+            BlockSettings = null,
             MatrixSettings = null
         };
 
@@ -234,7 +235,7 @@ public class KeyGenerationTests {
         };
 
         // Act & Assert
-        Assert.Throws<InvalidOperationException>(() => invalidBlockEntry.Validate());
+        validBlockEntryWithoutSettings.Validate(); // BlockSettings are optional for requested-length Block keys
         validBlockEntry.Validate(); // Should not throw
         Assert.Throws<InvalidOperationException>(() => invalidMatrixEntry.Validate());
         validMatrixEntry.Validate(); // Should not throw
@@ -291,11 +292,10 @@ public class KeyGenerationTests {
         ResetKeyServiceOptionsState();
         var config = new KeyServiceConfig {
             new() {
-                Key = 0,
+                KeySourceId = 0,
                 Value = new string('B', 600),
-                KeyIdMask = "0",
+                KeyHandleMask = "0",
                 Type = KeyType.Block,
-                BlockSettings = new KeyBlockSettings { MinLength = 64, MaxLength = 128 }
             }
         };
 
@@ -303,16 +303,18 @@ public class KeyGenerationTests {
         var service = new KeyService(options);
 
         // Act
-        byte[] generated = service.GenerateKey256(out ulong keyResult);
-        byte[] retrieved = service.GetKey256(keyResult);
+        Span<byte> generated = stackalloc byte[KeyService.KeySize256];
+        Span<byte> retrieved = stackalloc byte[KeyService.KeySize256];
+        service.GenerateKey(generated, out ulong keyHandle);
+        service.GetKey(keyHandle, retrieved);
 
-        _output.WriteLine($"Block keyResult: {keyResult}");
+        _output.WriteLine($"Block keyHandle: {keyHandle}");
         _output.WriteLine($"Block generated (hex): {Convert.ToHexString(generated)}");
         _output.WriteLine($"Block retrieved (hex): {Convert.ToHexString(retrieved)}");
 
         // Assert
-        Assert.Equal(0UL, keyResult & KeyService.keyIdMask);
-        Assert.Equal(generated, retrieved);
+        Assert.Equal(0, KeyHandleCodec.GetKeySourceId(keyHandle));
+        Assert.True(generated.SequenceEqual(retrieved));
     }
 
     [Fact]
@@ -442,7 +444,7 @@ public class KeyGenerationTests {
         return component == 0 ? 0 : (component == 1 ? 1 : (component == 2 ? -1 : 0));
     }
 
-    public void MatrixKeyGenerator_Regenerate_WithRandomizedVectorsPositionsAndLengths_ReturnsSameBytes(int iteration) {
+    private void MatrixKeyGenerator_Regenerate_WithRandomizedVectorsPositionsAndLengths_ReturnsSameBytes(int iteration) {
         // Arrange
         var settings = new KeyMatrixSettings {
             Width = 8,
@@ -521,29 +523,29 @@ public class KeyGenerationTests {
         string sourceText = BuildAsciiSourceText(220);
         var config = new KeyServiceConfig {
             new() {
-                Key = 0,
+                KeySourceId = 0,
                 Value = sourceText,
-                KeyIdMask = "0",
+                KeyHandleMask = "0",
                 Type = KeyType.Block,
-                BlockSettings = new KeyBlockSettings { MinLength = 64, MaxLength = 128 }
             }
         };
 
         var options = new KeyServiceOptions(Options.Create(config));
         var service = new KeyService(options);
 
-        const int keyId = 0;
-        const int keyPosition = 200;
-        const int keyLength = 64;
-        int keyResult = keyId + (keyPosition << KeyService.keyPositionSize) + (keyLength << KeyService.keyPositionAndLength);
+        const byte keySourceId = 0;
+        const uint keyPosition = 200;
+        const ushort keyLength = 64;
+        ulong keyHandle = KeyHandleCodec.PackBlock(keySourceId, keyPosition, keyLength, keyHandleMask: 0);
 
         // Act
-        var key = service.GetKey((ulong)keyResult);
-        string actual = new string(key.Span);
+        Span<byte> key = stackalloc byte[keyLength];
+        service.GetKey(keyHandle, key);
+        string actual = Encoding.UTF8.GetString(key);
 
-        string expected = BuildExpectedBlockMaterial(sourceText, keyPosition, keyLength);
+        string expected = BuildExpectedBlockMaterial(sourceText, (int)keyPosition, keyLength);
 
-        _output.WriteLine($"Block wrap keyResult: {keyResult}, keyPosition={keyPosition}, keyLength={keyLength}");
+        _output.WriteLine($"Block wrap keyHandle: {keyHandle}, keyPosition={keyPosition}, keyLength={keyLength}");
         _output.WriteLine($"Block wrap expected: {expected}");
         _output.WriteLine($"Block wrap actual:   {actual}");
 
@@ -560,11 +562,10 @@ public class KeyGenerationTests {
         string sourceText = BuildAsciiSourceText(600);
         var config = new KeyServiceConfig {
             new() {
-                Key = 0,
+                KeySourceId = 0,
                 Value = sourceText,
-                KeyIdMask = "0",
+                KeyHandleMask = "0",
                 Type = KeyType.Block,
-                BlockSettings = new KeyBlockSettings { MinLength = 64, MaxLength = 128 }
             }
         };
 
@@ -573,14 +574,15 @@ public class KeyGenerationTests {
 
         int keyPosition = RandomNumberGenerator.GetInt32(0, sourceText.Length);
         int keyLength = RandomNumberGenerator.GetInt32(64, 128);
-        ulong keyResult = (ulong)((keyPosition << KeyService.keyPositionSize) + (keyLength << KeyService.keyPositionAndLength));
+        ulong keyHandle = KeyHandleCodec.PackBlock(0, (uint)keyPosition, (ushort)keyLength, keyHandleMask: 0);
 
-        var key = service.GetKey(keyResult);
-        string actual = new string(key.Span);
+        byte[] key = new byte[keyLength];
+        service.GetKey(keyHandle, key);
+        string actual = Encoding.UTF8.GetString(key);
         string expected = BuildExpectedBlockMaterial(sourceText, keyPosition, keyLength);
 
         //if (iteration < 5) {
-        _output.WriteLine($"Block iter={iteration}, keyPosition={keyPosition}, keyLength={keyLength}, keyResult={keyResult}");
+        _output.WriteLine($"Block iter={iteration}, keyPosition={keyPosition}, keyLength={keyLength}, keyHandle={keyHandle}");
         _output.WriteLine($"Block expected: {expected}");
         _output.WriteLine($"Block actual:   {actual}");
         //}
@@ -593,6 +595,8 @@ public class KeyGenerationTests {
 
         type.GetField("_keys", BindingFlags.NonPublic | BindingFlags.Static)?.SetValue(null, null);
         type.GetField("_keyMemory", BindingFlags.NonPublic | BindingFlags.Static)?.SetValue(null, null);
+        type.GetField("_keyBytes", BindingFlags.NonPublic | BindingFlags.Static)?.SetValue(null, null);
+        type.GetField("_keySourceIds", BindingFlags.NonPublic | BindingFlags.Static)?.SetValue(null, null);
         type.GetField("_keyCount", BindingFlags.NonPublic | BindingFlags.Static)?.SetValue(null, 0);
         type.GetField("_initialised", BindingFlags.NonPublic | BindingFlags.Static)?.SetValue(null, false);
     }
