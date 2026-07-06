@@ -1,5 +1,9 @@
 <Solution>
+  <Project Path="Mrbr.Service.KeyManager.Benchmarks/Mrbr.Service.KeyManager.Benchmarks.csproj" />
   <Project Path="Mrbr.Service.KeyManager.KeyGenerator/Mrbr.Service.KeyManager.KeyGenerator.csproj" Id="55cd3922-3ace-4eba-96eb-b2ad2801a260" />
   <Project Path="Mrbr.Service.KeyManager.Tests/Mrbr.Service.KeyManager.Tests.csproj" />
   <Project Path="Mrbr.Service.KeyManager/Mrbr.Service.KeyManager.csproj" />
+  <Folder Name="/Solution Items/">
+    <File Path="./Solution Items/todos.md" />
+  </Folder>
 </Solution>
